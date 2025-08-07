@@ -41,17 +41,17 @@ Write-Host "Erkannte CLR-Version: $currentCLRVersion" -ForegroundColor Cyan
 # fix DLLs being blocked post extraction
 Get-ChildItem -Path $ScriptBaseDir -Recurse | Unblock-File
 
-if ($currentPSEdition -eq "Core") {
-    if ($currentCLRVersion -and $currentCLRVersion.StartsWith("9.")) { [void][System.Reflection.Assembly]::LoadFrom((Join-Path $ScriptBaseDir "lib\net9.0\Renci.SshNet.dll")); (Write-Host "net9.0")}
-    if ($currentCLRVersion -and $currentCLRVersion.StartsWith("8.")) { [void][System.Reflection.Assembly]::LoadFrom((Join-Path $ScriptBaseDir "lib\net8.0\Renci.SshNet.dll")); (Write-Host "net8.0")}
-    if ($currentCLRVersion -and $currentCLRVersion.StartsWith("7.")) { [void][System.Reflection.Assembly]::LoadFrom((Join-Path $ScriptBaseDir "lib\net7.0\Renci.SshNet.dll")); (Write-Host "net7.0")}
-    if ($currentCLRVersion -and $currentCLRVersion.StartsWith("6.")) { [void][System.Reflection.Assembly]::LoadFrom((Join-Path $ScriptBaseDir "lib\net6.0\Renci.SshNet.dll")); (Write-Host "net6.0")}
-    else { [void][System.Reflection.Assembly]::LoadFrom((Join-Path $ScriptBaseDir "lib\netstandard2.1\Renci.SshNet.dll")); (Write-Host "netstandard2.1")}
-} else { # Desktop (Windows PowerShell)
-    #Add-Type -Path (Join-Path $ScriptBaseDir "lib\net462\Renci.SshNet.dll") -ErrorAction Stop
-	[void][System.Reflection.Assembly]::LoadFrom((Join-Path $ScriptBaseDir "lib\net462\Renci.SshNet.dll"))
-	Write-Host "net462"
+# --- MODIFIED: Replaced direct SSH.NET DLL loading with Posh-SSH module import ---
+try {
+    Import-Module "$ScriptBaseDir\lib\Posh-SSH\Posh-SSH.psd1" -ErrorAction Stop
+    Write-Host "Posh-SSH module imported successfully." -ForegroundColor Cyan
 }
+catch {
+    Write-Error "Failed to import the Posh-SSH module even though it appears to be installed. Error: $_"
+    Read-Host "Press Enter to exit..."
+    exit
+}
+# --- END MODIFICATION ---
 
 # Create a directory for connection profiles if it doesn't exist
 $ProfilesDir = Join-Path $ScriptBaseDir "Profiles"
@@ -366,18 +366,17 @@ function Start-SerialSession {
     }
 }
 
-# --- MODIFIED FUNCTION ---
 function Start-SshSession {
     param(
         [PSCustomObject]$Config
     )
 
-    # Use SSH.NET for an integrated session with logging capabilities
+    # Variables for Posh-SSH session and underlying client
+    $poshSession = $null
     $client = $null
     $shellStream = $null
     $logger = $null
     $readerJob = $null
-    $passwordPtr = [IntPtr]::Zero
 
     try {
         # Start the logger if configured
@@ -385,77 +384,62 @@ function Start-SshSession {
             $logger = Start-SessionLogger -LogFilePath $Config.LogFilePath -RawSessionData:$Config.RawLogData -ObfuscatePasswords:$Config.ObfuscatePasswords
         }
 
-        # Prompt for password securely
+        # Prompt for credentials using standard PowerShell secure prompt
         Write-Host "Connecting to $($Config.Host) on port $($Config.SshPort)..." -ForegroundColor Cyan
-        $passwordSecure = Read-Host -Prompt "Password for $($Config.User)@$($Config.Host)" -AsSecureString
+        # $credential = Get-Credential -UserName $Config.User -Message "Enter credentials for $($Config.User)@$($Config.Host)" broken
+		$user = if ($Config.User) { $Config.User } else { Read-Host "Enter SSH username" }
+		$securePassword = Read-Host "Enter SSH password" -AsSecureString
+		$credential = New-Object System.Management.Automation.PSCredential ($user, $securePassword)
 
-        # Convert SecureString to plain text for the library
-        $passwordPtr = [System.Runtime.InteropServices.Marshal]::SecureStringToBSTR($passwordSecure)
-        $plainPassword = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($passwordPtr)
+        if (-not $credential) { throw "User cancelled the credential prompt." }
 
-        # Set up authentication method
-        $authMethod = New-Object Renci.SshNet.PasswordAuthenticationMethod($Config.User, $plainPassword)
-
-        # Create and configure the SSH client
-        $client = New-Object Renci.SshNet.SshClient($Config.Host, $Config.SshPort, $Config.User, $authMethod)
-        
-        # Configure keep-alive using the library's built-in feature
+        # Prepare parameters for New-SSHSession
+        $sessionParams = @{
+            ComputerName = $Config.Host
+            Port         = $Config.SshPort
+            Credential   = $credential
+            ErrorAction  = 'Stop'
+        }
         if ($Config.KeepAlive) {
-            $client.KeepAliveInterval = [TimeSpan]::FromSeconds(30)
+            # Posh-SSH KeepAlive is in seconds
+            $sessionParams['KeepAliveInterval'] = 30
         }
 
-        # Connect to the server
-        $client.Connect()
+        # Create and configure the SSH session using Posh-SSH
 
-        # Create an interactive shell stream
+        $poshSession = New-SSHSession @sessionParams
+        $client = ($poshSession | Select-Object -First 1).Session
+
+        if (-not $client.IsConnected) {
+            throw "Failed to establish an SSH connection via Posh-SSH."
+        }
+
         $termWidth = if ($Host.UI.RawUI.WindowSize.Width -gt 0) { $Host.UI.RawUI.WindowSize.Width } else { 80 }
         $termHeight = if ($Host.UI.RawUI.WindowSize.Height -gt 0) { $Host.UI.RawUI.WindowSize.Height } else { 24 }
+
         $shellStream = $client.CreateShellStream("xterm-256color", $termWidth, $termHeight, 0, 0, 1024)
 
-        # Start a background job to read data from the server
-        $readerJob = Start-Job -ScriptBlock {
-            param($streamRef, $logQueueRef)
-            $stream = $streamRef.get_Value()
-            $logQueue = $logQueueRef.get_Value()
-            $buffer = New-Object byte[] 4096
-            $encoding = [System.Text.Encoding]::UTF8
-
-            while ($stream.CanRead) {
-                try {
-                    if ($stream.DataAvailable) {
-                        $bytesRead = $stream.Read($buffer, 0, $buffer.Length)
-                        if ($bytesRead -gt 0) {
-                            $text = $encoding.GetString($buffer, 0, $bytesRead)
-                            Write-Host $text -NoNewline
-                            if ($logQueue) { $logQueue.Enqueue([PSCustomObject]@{Source='Server'; Data=$text}) }
-                        }
-                    } else {
-                        Start-Sleep -Milliseconds 50
-                    }
-                } catch {
-                    break
-                }
-            }
-        } -ArgumentList ([ref]$shellStream), ([ref]$logger.Queue)
-
         [Console]::TreatControlCAsInput = $true
-        
+
+        # Input helpers for special keys
         $inputHelpers = [Collections.Generic.Dictionary[ConsoleKey, String]]::new()
-        $inputHelpers.Add("UpArrow", "$([char]27)[A"); $inputHelpers.Add("DownArrow", "$([char]27)[B")
-        $inputHelpers.Add("RightArrow", "$([char]27)[C"); $inputHelpers.Add("LeftArrow", "$([char]27)[D")
-        $inputHelpers.Add("Delete", "$([char]27)[3~"); 
-        $inputHelpers.Add("Backspace", $([char]127)) 
-        $inputHelpers.Add("Home", "$([char]27)[H"); $inputHelpers.Add("End", "$([char]27)[F")
-        $inputHelpers.Add("PageUp", "$([char]27)[5~"); $inputHelpers.Add("PageDown", "$([char]27)[6~")
+        $inputHelpers.Add("UpArrow", "$([char]27)[A")
+        $inputHelpers.Add("DownArrow", "$([char]27)[B")
+        $inputHelpers.Add("RightArrow", "$([char]27)[C")
+        $inputHelpers.Add("LeftArrow", "$([char]27)[D")
+        $inputHelpers.Add("Delete", "$([char]27)[3~")
+        $inputHelpers.Add("Backspace", $([char]127))
+        $inputHelpers.Add("Home", "$([char]27)[H")
+        $inputHelpers.Add("End", "$([char]27)[F")
+        $inputHelpers.Add("PageUp", "$([char]27)[5~")
+        $inputHelpers.Add("PageDown", "$([char]27)[6~")
         $inputHelpers.Add("Insert", "$([char]27)[2~")
         $inputHelpers.Add("Tab", "`t")
 
-        Write-Host "`n--- SSH Session Started using SSH.NET. Press ESC in the console to exit. ---" -ForegroundColor Green
-        
-        # Wait for the initial banner/prompt before sending auto-input
-        Start-Sleep -Milliseconds 500 
+        # Wait a moment for any initial output
+        Start-Sleep -Milliseconds 500
 
-        # Handle Auto-Input right after connection
+        # Send auto-input if configured
         if ($Config.AutoInput) {
             Write-Host "`nSending auto-input..." -ForegroundColor Cyan
             foreach ($line in $Config.AutoInput.Split("`n")) {
@@ -464,23 +448,67 @@ function Start-SshSession {
                 $shellStream.Write($bytes, 0, $bytes.Length)
                 $shellStream.Flush()
                 if ($logger) { $logger.Queue.Enqueue([PSCustomObject]@{Source='User'; Data=$command}) }
-                Start-Sleep -Milliseconds 200 # Wait a bit between commands
+                Start-Sleep -Milliseconds 200
             }
         }
 
-        # Main interactive loop
-        while ($client.IsConnected -and $readerJob.State -in @('Running', 'NotStarted')) {
+		# After shellStream creation
+		Start-Sleep -Milliseconds 200
+
+		# Read initial remote output (including clear-screen)
+		$initialOutput = ''
+		while ($shellStream.DataAvailable) {
+			$buffer = New-Object byte[] 4096
+			$read = $shellStream.Read($buffer, 0, $buffer.Length)
+			if ($read -gt 0) {
+				$initialOutput += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $read)
+				Start-Sleep -Milliseconds 100
+			} else { break }
+		}
+		
+		Write-Host $initialOutput
+		# Clear Host locally and set colors again to ensure clean state
+		Clear-Host
+		$Host.UI.RawUI.ForegroundColor = $global:ConnectionConfig.TextColor
+		$Host.UI.RawUI.BackgroundColor = $global:ConnectionConfig.BackgroundColor
+		# Increase buffer height to 10000 lines
+		$host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
+
+		# Now display your session start message and optionally print initial output after clearing screen
+		Write-Host "--- SSH Session Started using Posh-SSH. Press ESC in the console to exit. ---`n" -ForegroundColor Green
+
+        # Main synchronous loop to read output and handle input
+        while ($client.IsConnected) {
+
+            # Read all available data from the shell stream
+            while ($shellStream.DataAvailable) {
+                $bytesRead = $shellStream.Read($buffer, 0, $buffer.Length)
+                if ($bytesRead -gt 0) {
+                    $text = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $bytesRead)
+					Write-Host $text -NoNewline
+                    if ($logger) { $logger.Queue.Enqueue([PSCustomObject]@{Source='Server'; Data=$text}) }
+                }
+            }
+
+            # Handle user input if available
             if ([Console]::KeyAvailable) {
                 $key = [Console]::ReadKey($true)
-                if ($key.Key -eq 'Escape') { break }
+                if ($key.Key -eq 'Escape') {
+                    break
+                }
 
                 $output = if ($inputHelpers.ContainsKey($key.Key)) { $inputHelpers[$key.Key] } else { $key.KeyChar }
+
                 $bytes = [System.Text.Encoding]::UTF8.GetBytes($output)
                 $shellStream.Write($bytes, 0, $bytes.Length)
                 $shellStream.Flush()
-                if ($logger -and $Config.RawLogData) { $logger.Queue.Enqueue([PSCustomObject]@{Source='User'; Data=$output}) }
+
+                if ($logger -and $Config.RawLogData) {
+                    $logger.Queue.Enqueue([PSCustomObject]@{Source='User'; Data=$output})
+                }
             }
-            Start-Sleep -Milliseconds 20
+
+            Start-Sleep -Milliseconds 10
         }
     }
     catch {
@@ -488,20 +516,17 @@ function Start-SshSession {
         if ($_.Exception.InnerException) {
             Write-Error "Inner Exception: $($_.Exception.InnerException.Message)"
         }
+        [Console]::ReadKey($true)
     }
     finally {
         Write-Host "`n--- SSH Session Closed. ---" -ForegroundColor Yellow
-        # Clean up resources
-        if ($readerJob) { Stop-Job $readerJob | Remove-Job -Force }
+
         if ($logger) { Stop-SessionLogger $logger }
         if ($shellStream) { $shellStream.Dispose() }
-        if ($client) { if ($client.IsConnected) { $client.Disconnect() }; $client.Dispose() }
-        # Securely clear the password from memory
-        if ($passwordPtr -ne [IntPtr]::Zero) { [System.Runtime.InteropServices.Marshal]::ZeroFreeBSTR($passwordPtr) }
+        if ($poshSession) { Remove-SSHSession -SSHSession $poshSession }
         [Console]::TreatControlCAsInput = $false
     }
 }
-# --- END MODIFIED FUNCTION ---
 
 function Start-TelnetSession {
     param(
@@ -521,6 +546,13 @@ function Start-TelnetSession {
         if ($Config.BackgroundLogging) {
             $logger = Start-SessionLogger -LogFilePath $Config.LogFilePath -RawSessionData:$Config.RawLogData -ObfuscatePasswords:$Config.ObfuscatePasswords
         }
+
+		# Clear Host locally and set colors again to ensure clean state
+		Clear-Host
+		$Host.UI.RawUI.ForegroundColor = $global:ConnectionConfig.TextColor
+		$Host.UI.RawUI.BackgroundColor = $global:ConnectionConfig.BackgroundColor
+		# Increase buffer height to 10000 lines
+		$host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
 
         $readerJob = Start-Job -ScriptBlock {
             param($streamRef, $logQueueRef)
@@ -617,8 +649,8 @@ function Start-TelnetSession {
 
 function Show-ConnectionConfigMenu {
 
-	# $consoleHandle = [ConsoleUtils]::GetConsoleWindow()
-	# [ConsoleUtils]::ShowWindow($consoleHandle, 0)
+	$consoleHandle = [ConsoleUtils]::GetConsoleWindow()
+	[ConsoleUtils]::ShowWindow($consoleHandle, 0)
 
 
     $form = New-Object Windows.Forms.Form
@@ -827,7 +859,7 @@ function Show-ConnectionConfigMenu {
     $form.add_Load({ $loadProfile.Invoke("Default-Serial") })
     $result = $form.ShowDialog()
 
-	# [ConsoleUtils]::ShowWindow($consoleHandle, 5)
+	[ConsoleUtils]::ShowWindow($consoleHandle, 5)
 
     if ($result -eq [Windows.Forms.DialogResult]::OK) {
         $global:ConnectionConfig = [PSCustomObject]@{
@@ -914,7 +946,7 @@ if ($global:ConnectionConfig) {
             $Host.UI.RawUI.BackgroundColor = [System.ConsoleColor]::Black
         }
         Clear-Host
-        Write-Host "Session terminated. Console colors restored." -ForegroundColor Green
+        Write-Host "Session terminated" -ForegroundColor Green
     }
 }
 
