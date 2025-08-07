@@ -42,12 +42,14 @@ Write-Host "Erkannte CLR-Version: $currentCLRVersion" -ForegroundColor Cyan
 Get-ChildItem -Path $ScriptBaseDir -Recurse | Unblock-File
 
 if ($currentPSEdition -eq "Core") {
-    if ($currentCLRVersion -and $currentCLRVersion.StartsWith("8.") -and (Test-Path (Join-Path $ScriptBaseDir "lib\net8.0"))) { Add-Type -Path (Join-Path $ScriptBaseDir "lib\net8.0\Renci.SshNet.dll") -ErrorAction Stop; (Write-Host "net8.0")}
-    if ($currentCLRVersion -and $currentCLRVersion.StartsWith("7.")) { Add-Type -Path (Join-Path $ScriptBaseDir "lib\net7.0\Renci.SshNet.dll") -ErrorAction Stop; (Write-Host "net7.0")}
-    if ($currentCLRVersion -and $currentCLRVersion.StartsWith("6.")) { Add-Type -Path (Join-Path $ScriptBaseDir "lib\net6.0\Renci.SshNet.dll") -ErrorAction Stop; (Write-Host "net6.0")}
-    else { Add-Type -Path (Join-Path $ScriptBaseDir "lib\netstandard2.1\Renci.SshNet.dll") -ErrorAction Stop; (Write-Host "netstandard2.1")}
+    if ($currentCLRVersion -and $currentCLRVersion.StartsWith("9.")) { [void][System.Reflection.Assembly]::LoadFrom((Join-Path $ScriptBaseDir "lib\net9.0\Renci.SshNet.dll")); (Write-Host "net9.0")}
+    if ($currentCLRVersion -and $currentCLRVersion.StartsWith("8.")) { [void][System.Reflection.Assembly]::LoadFrom((Join-Path $ScriptBaseDir "lib\net8.0\Renci.SshNet.dll")); (Write-Host "net8.0")}
+    if ($currentCLRVersion -and $currentCLRVersion.StartsWith("7.")) { [void][System.Reflection.Assembly]::LoadFrom((Join-Path $ScriptBaseDir "lib\net7.0\Renci.SshNet.dll")); (Write-Host "net7.0")}
+    if ($currentCLRVersion -and $currentCLRVersion.StartsWith("6.")) { [void][System.Reflection.Assembly]::LoadFrom((Join-Path $ScriptBaseDir "lib\net6.0\Renci.SshNet.dll")); (Write-Host "net6.0")}
+    else { [void][System.Reflection.Assembly]::LoadFrom((Join-Path $ScriptBaseDir "lib\netstandard2.1\Renci.SshNet.dll")); (Write-Host "netstandard2.1")}
 } else { # Desktop (Windows PowerShell)
-    Add-Type -Path (Join-Path $ScriptBaseDir "lib\net462\Renci.SshNet.dll") -ErrorAction Stop
+    #Add-Type -Path (Join-Path $ScriptBaseDir "lib\net462\Renci.SshNet.dll") -ErrorAction Stop
+	[void][System.Reflection.Assembly]::LoadFrom((Join-Path $ScriptBaseDir "lib\net462\Renci.SshNet.dll"))
 	Write-Host "net462"
 }
 
@@ -615,8 +617,8 @@ function Start-TelnetSession {
 
 function Show-ConnectionConfigMenu {
 
-	$consoleHandle = [ConsoleUtils]::GetConsoleWindow()
-	[ConsoleUtils]::ShowWindow($consoleHandle, 0)
+	# $consoleHandle = [ConsoleUtils]::GetConsoleWindow()
+	# [ConsoleUtils]::ShowWindow($consoleHandle, 0)
 
 
     $form = New-Object Windows.Forms.Form
@@ -825,7 +827,7 @@ function Show-ConnectionConfigMenu {
     $form.add_Load({ $loadProfile.Invoke("Default-Serial") })
     $result = $form.ShowDialog()
 
-	[ConsoleUtils]::ShowWindow($consoleHandle, 5)
+	# [ConsoleUtils]::ShowWindow($consoleHandle, 5)
 
     if ($result -eq [Windows.Forms.DialogResult]::OK) {
         $global:ConnectionConfig = [PSCustomObject]@{
