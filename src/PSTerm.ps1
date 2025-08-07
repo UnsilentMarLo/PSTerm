@@ -7,7 +7,7 @@ Add-Type -AssemblyName Microsoft.VisualBasic
 Add-Type -AssemblyName System
 [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-# Use PInvoke to hide/show the console window for a cleaner GUI experience
+#Use PInvoke to hide/show the console window for a cleaner GUI experience
 Add-Type -TypeDefinition @"
     using System;
     using System.Runtime.InteropServices;
@@ -22,11 +22,15 @@ Add-Type -TypeDefinition @"
     }
 "@
 
+
 if ($MyInvocation.MyCommand.CommandType -eq "ExternalScript")
  { $ScriptBaseDir = Split-Path -Parent -Path $MyInvocation.MyCommand.Definition }
  else
  { $ScriptBaseDir = Split-Path -Parent -Path ([Environment]::GetCommandLineArgs()[0]) 
-     if (!$ScriptBaseDir){ $ScriptBaseDir = if ($PSScriptRoot) { $PSScriptRoot } else { Get-Location } } }
+	if ([string]::IsNullOrWhiteSpace($ScriptBaseDir)) {
+		$ScriptBaseDir = if (![string]::IsNullOrWhiteSpace($PSScriptRoot)) { $PSScriptRoot } else { Get-Location }
+	}
+}
 
 $currentPSEdition = $PSVersionTable.PSEdition
 $currentCLRVersion = if ($PSVersionTable.CLRVersion) { $PSVersionTable.CLRVersion.ToString() }
@@ -34,11 +38,14 @@ $currentCLRVersion = if ($PSVersionTable.CLRVersion) { $PSVersionTable.CLRVersio
 Write-Host "Erkannte PowerShell-Edition: $currentPSEdition" -ForegroundColor Cyan
 Write-Host "Erkannte CLR-Version: $currentCLRVersion" -ForegroundColor Cyan
 
+# fix DLLs being blocked post extraction
+Get-ChildItem -Path $ScriptBaseDir -Recurse | Unblock-File
+
 if ($currentPSEdition -eq "Core") {
-    if ($currentCLRVersion -and $currentCLRVersion.StartsWith("8.") -and (Test-Path (Join-Path $ScriptBaseDir "lib\net8.0"))) { Add-Type -Path (Join-Path $ScriptBaseDir "lib\net8.0\Renci.SshNet.dll") -ErrorAction Stop (Write-Host "net8.0")}
-    if ($currentCLRVersion -and $currentCLRVersion.StartsWith("7.")) { Add-Type -Path (Join-Path $ScriptBaseDir "lib\net7.0\Renci.SshNet.dll") -ErrorAction Stop (Write-Host "net7.0")}
-    if ($currentCLRVersion -and $currentCLRVersion.StartsWith("6.")) { Add-Type -Path (Join-Path $ScriptBaseDir "lib\net6.0\Renci.SshNet.dll") -ErrorAction Stop (Write-Host "net6.0")}
-    else { Add-Type -Path (Join-Path $ScriptBaseDir "lib\netstandard2.1\Renci.SshNet.dll") -ErrorAction Stop (Write-Host "netstandard2.1")}
+    if ($currentCLRVersion -and $currentCLRVersion.StartsWith("8.") -and (Test-Path (Join-Path $ScriptBaseDir "lib\net8.0"))) { Add-Type -Path (Join-Path $ScriptBaseDir "lib\net8.0\Renci.SshNet.dll") -ErrorAction Stop; (Write-Host "net8.0")}
+    if ($currentCLRVersion -and $currentCLRVersion.StartsWith("7.")) { Add-Type -Path (Join-Path $ScriptBaseDir "lib\net7.0\Renci.SshNet.dll") -ErrorAction Stop; (Write-Host "net7.0")}
+    if ($currentCLRVersion -and $currentCLRVersion.StartsWith("6.")) { Add-Type -Path (Join-Path $ScriptBaseDir "lib\net6.0\Renci.SshNet.dll") -ErrorAction Stop; (Write-Host "net6.0")}
+    else { Add-Type -Path (Join-Path $ScriptBaseDir "lib\netstandard2.1\Renci.SshNet.dll") -ErrorAction Stop; (Write-Host "netstandard2.1")}
 } else { # Desktop (Windows PowerShell)
     Add-Type -Path (Join-Path $ScriptBaseDir "lib\net462\Renci.SshNet.dll") -ErrorAction Stop
 	Write-Host "net462"
@@ -607,8 +614,10 @@ function Start-TelnetSession {
 #region GUI Function
 
 function Show-ConnectionConfigMenu {
-    $consoleHandle = [ConsoleUtils]::GetConsoleWindow()
-    [ConsoleUtils]::ShowWindow($consoleHandle, 0)
+
+	$consoleHandle = [ConsoleUtils]::GetConsoleWindow()
+	[ConsoleUtils]::ShowWindow($consoleHandle, 0)
+
 
     $form = New-Object Windows.Forms.Form
     $form.Text = "Connection Configuration"
@@ -816,7 +825,7 @@ function Show-ConnectionConfigMenu {
     $form.add_Load({ $loadProfile.Invoke("Default-Serial") })
     $result = $form.ShowDialog()
 
-    [ConsoleUtils]::ShowWindow($consoleHandle, 5)
+	[ConsoleUtils]::ShowWindow($consoleHandle, 5)
 
     if ($result -eq [Windows.Forms.DialogResult]::OK) {
         $global:ConnectionConfig = [PSCustomObject]@{
@@ -906,36 +915,39 @@ if ($global:ConnectionConfig) {
         Write-Host "Session terminated. Console colors restored." -ForegroundColor Green
     }
 }
+
+
+
 # SIG # Begin signature block
 # MIIFnQYJKoZIhvcNAQcCoIIFjjCCBYoCAQExCzAJBgUrDgMCGgUAMGkGCisGAQQB
 # gjcCAQSgWzBZMDQGCisGAQQBgjcCAR4wJgIDAQAABBAfzDtgWUsITrck0sYpfvNR
-# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUw9xm+WJXgYWk9hT3QY8Jl1cz
-# /NmgggMoMIIDJDCCAgygAwIBAgIQVTcfF5xf3L1HZ4e3/qNu6TANBgkqhkiG9w0B
+# AgEAAgEAAgEAAgEAAgEAMCEwCQYFKw4DAhoFAAQUvZmDR7F6+Hanle14pvL8/y4m
+# hMmgggMoMIIDJDCCAgygAwIBAgIQHYxGkDJPdphJy8w8ewF1ADANBgkqhkiG9w0B
 # AQsFADAqMSgwJgYDVQQDDB9QU1Rlcm0gQ29kZSBTaWduaW5nIENlcnRpZmljYXRl
-# MB4XDTI1MDgwNjE4NDEyOFoXDTMwMDgwNjE4NDEyOFowKjEoMCYGA1UEAwwfUFNU
+# MB4XDTI1MDgwNzA5NDU1MFoXDTMwMDgwNzA5NDU1MFowKjEoMCYGA1UEAwwfUFNU
 # ZXJtIENvZGUgU2lnbmluZyBDZXJ0aWZpY2F0ZTCCASIwDQYJKoZIhvcNAQEBBQAD
-# ggEPADCCAQoCggEBANLIzrv5MwcQq76JAXBayjrgTUOgw9wDmtRIKcfrdcRcDfou
-# ri8EiZ3SPqxbNcbhSX8mwKoM17WrJlIbSf2h4bJtbjVCJeGCqunROAiLZyF04flt
-# in0DRPH0UeE53rVjo/9AuO0seGmogwnNI+3npBU+//wDsj4DaPW7G7O4xqMZ9u6m
-# gAMIMev+gjUByB2gq0U/Y5jxpAxPFAvNAmg0DsIm2qXmhQT9O0MtUMbOAUwtz+pb
-# hoYCNQ1XKe1LjKkqAvqmcPVHrqZciO3pWrNTQSxbSxVKD9csrklD3HAlVDcR8fph
-# GaIkqXzNBAoUs7eDj/LFQbPurEvS8uEDqL+3CkECAwEAAaNGMEQwDgYDVR0PAQH/
-# BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBTM1ldWcvx6uPJ7
-# kl51z6MVTeuYAjANBgkqhkiG9w0BAQsFAAOCAQEAQEs3xuziXKyl7KDhbfg2gj4Q
-# VgfeuY2D2pV9CR+D35Unyl9KLIxFp5RDlBDRPIE6HmYuJCXVJUReezXQhGt0iooT
-# 8yGVA563rwhK1HroLucjM8c+ZBnafD6ZZ4s3wEOEZyvOXMpFV7pL2rk9g8hnUTwJ
-# TaOUUfqdcr7CSlu48NbiRNS12YE43oym+q1nT+XqgwJaF+M8W5lBE5PDHbHtoVfz
-# jvY4dQM8iD2WGefcgAfxVgPdyxhYu3CWvgxIDYSxcygdx9royXt3u80mP6W7A0tV
-# 6UdvZIKVPR+0WGodYW2wdWfJ5cfkjWoGy+zvQBAkGwqJWBLElf+b1VdNGDdGLTGC
+# ggEPADCCAQoCggEBAN8xeGkSikEmuisE6KZZ0gx/1PaogiEQYDzyNnaofoSJQy18
+# 4YHRRlr4dkEBwwxbs/nL5QN8UiP/D7Jl3WA/Yb9Sm/GTwvNx4QSAK/4U33eRBr5H
+# 7n01Vfr3xGMuGEpYi+hnayI/GZWYPuij21w9KmSmIccxg3I8ioKR0ahh6hN8iHsd
+# WudgRtN0HP5K4Ac1IJXNln8H840zO5rTlGlurOj1G9CtNwfstbCta9/UxcTo7prr
+# nMBBULgtZcXTbKV0AwNNhTNepNEw+psYSOdfGB46UvqE2orMZxNQk8GztMf48Cxk
+# bYXCkQgAs25g2DhTENNX6knEpr8mFLliP7kHdQkCAwEAAaNGMEQwDgYDVR0PAQH/
+# BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMDMB0GA1UdDgQWBBQaMCVJRI0sgUC5
+# /HFvxOQgiGpx/jANBgkqhkiG9w0BAQsFAAOCAQEAI6yPDmsJ78+U5kaajgGUJsTJ
+# /Sw4bFJp4AXui0uHAyH2OcZ+SF6pVa9JKyS6nZIG9tc6bascb/I0jXY94Bs9hq0S
+# +WA9wvaNlgN+g/6iUwNwvshK+5AcskHVugT6U5ssLe+RjYqWy/WQ/YU2Pg36/8AQ
+# OIR2ITLb24eyAse/zNDfQLSwaUx+z3NuDx4uy2suYsjsC4fxHeW6EmJiOgTxEpkl
+# 7+AdlL9EazEFaeAigkk/SboX2+wh4JF4lvGBZs6KwtAxcyYRRalcwcanC5B96Sjj
+# asNbSRzxLY62EZMLJ5UMlE74NAYx4TDzwd+FyiwQaMLL+pCNh+OAZhSGGt+1VTGC
 # Ad8wggHbAgEBMD4wKjEoMCYGA1UEAwwfUFNUZXJtIENvZGUgU2lnbmluZyBDZXJ0
-# aWZpY2F0ZQIQVTcfF5xf3L1HZ4e3/qNu6TAJBgUrDgMCGgUAoHgwGAYKKwYBBAGC
+# aWZpY2F0ZQIQHYxGkDJPdphJy8w8ewF1ADAJBgUrDgMCGgUAoHgwGAYKKwYBBAGC
 # NwIBDDEKMAigAoAAoQKAADAZBgkqhkiG9w0BCQMxDAYKKwYBBAGCNwIBBDAcBgor
-# BgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAjBgkqhkiG9w0BCQQxFgQUN26AvsIY
-# +RgEEdf0QPCCFTk1rdQwDQYJKoZIhvcNAQEBBQAEggEAmm/KMh/7Sz/s8iKNBEll
-# 2kuGnAKuOkiwbmGuix++SCISrfuVt/9sAj+DkF78wt+ftSHH5/fRJqYdHOyqj5KC
-# a3q1lzuk5paEzaT2y2Kn+8H1ClHQm9OZ+DV214OG+jB5qY6ksRx3YzWAYJt6tYX3
-# hWN8IBNDRtjTII9+5kVf4zzWHIUo/5PwIOPm3TkxbPyDQ2I7VWxjiw6LQa1CHWW7
-# AMi0a4ymn49FwtMKZQrSxQ1s4VGAf5rFIBlGx2so7YwL407QV0ujzL6u385+J6To
-# x+DJZxdhW9XHgVfj6Tk2QQdk/b5MOwK7TG6rC7c8Vw+55JgRc4hDQPw/9lp/Q/Aa
-# vg==
+# BgEEAYI3AgELMQ4wDAYKKwYBBAGCNwIBFTAjBgkqhkiG9w0BCQQxFgQUdwalcOfj
+# KGYcPM3E0ny6aAZlaPgwDQYJKoZIhvcNAQEBBQAEggEAxcnlv+Rb2feupVF33mQ8
+# 18ifE1JOYowFlZf5peTtzJxJA1GKjVDa3y5DMDpQ1qRet8jHJmWSyu0EcqsO+oO0
+# XKgo0Olc2dMBHkQFdFl1TW/3hZYqEkujH7jc/eK2RGExRzQ/s6nZoRFmN4IGiG8k
+# +0NODFB0tz6upEWsdFRl3STql+0DbNW7QEe57JkHVdwpbIhvMToLvAFPZkpNRmdm
+# PXaiIoHVSsDX+zQ+sqAhuoJQrr8v2hebFiW7gXowVLcQrwHnvaKy6J2COiNclFCL
+# M09G+C/Y95f0PUIsxG169CRbaAVsARLu+3UAFlOkkGQTvrf7BZoxskaCTpYVLIDL
+# Rw==
 # SIG # End signature block
