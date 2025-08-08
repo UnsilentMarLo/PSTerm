@@ -73,30 +73,5 @@
         "COMPort":  "",
         "BackgroundLogging":  false,
         "LogFilePath":  ""
-    },
-    {
-        "DataBits":  8,
-        "StopBits":  "One",
-        "Type":  "SSH",
-        "AutoInput":  "",
-        "BackgroundColor":  "Black",
-        "BaudRate":  9600,
-        "TelnetPort":  23,
-        "RawLogData":  false,
-        "Parity":  "None",
-        "SshPort":  22,
-        "RTSEnable":  false,
-        "Host":  "192.168.178.43",
-        "User":  "admin",
-        "Name":  "Test",
-        "ObfuscatePasswords":  false,
-        "Handshake":  "None",
-        "TelnetNegotiation":  "Active",
-        "TextColor":  "Green",
-        "CursorSize":  "Normal",
-        "KeepAlive":  false,
-        "COMPort":  "COM3",
-        "BackgroundLogging":  false,
-        "LogFilePath":  ""
     }
 ]

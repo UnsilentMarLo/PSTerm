@@ -22,7 +22,6 @@ Add-Type -TypeDefinition @"
     }
 "@
 
-
 if ($MyInvocation.MyCommand.CommandType -eq "ExternalScript")
  { $ScriptBaseDir = Split-Path -Parent -Path $MyInvocation.MyCommand.Definition }
  else
@@ -177,7 +176,6 @@ function Save-Profile($name, $config) {
 #endregion Profile Management Functions
 
 #region Session Handlers
-
 function Start-SessionLogger {
     param(
         [string]$LogFilePath,
@@ -192,6 +190,7 @@ function Start-SessionLogger {
         if ($logDir -and (-not (Test-Path $logDir))) {
             New-Item -ItemType Directory -Path $logDir -Force | Out-Null
         }
+        # Create or overwrite log file
         New-Item -Path $LogFilePath -ItemType File -Force | Out-Null
     }
     catch {
@@ -199,26 +198,28 @@ function Start-SessionLogger {
         return $null
     }
 
+    # Create a synchronized queue (thread-safe)
     $logQueue = [System.Collections.Queue]::Synchronized( (New-Object System.Collections.Queue) )
 
-    $logJob = Start-Job -ScriptBlock {
-        param($path, $queue, $obfuscate, $raw)
-        
+    # Create a stop flag [ref] to signal logger to end
+    $stopFlag = [ref]$false
+
+    # Define the logger scriptblock running in background runspace
+    $loggerScript = {
+        param($path, $queue, $stopRef, $obfuscate, $raw)
+
         $passwordPromptDetected = $false
-        # Regex to find password prompts. Case-insensitive.
         $passwordPromptRegex = 'password:|passphrase for|enter password'
 
-        while ($true) {
-            if ($queue.Count -gt 0) {
+        while (-not $stopRef.Value) {
+            while ($queue.Count -gt 0) {
                 $logEntry = $queue.Dequeue()
                 if ($null -eq $logEntry) { continue }
 
                 $dataToLog = $logEntry.Data
-                
-                # Obfuscation logic only runs if all three conditions are met
-                if ($obfuscate -and $raw -and $logEntry.Source) {
+
+                if ($obfuscate -and $logEntry.Source) {
                     if ($logEntry.Source -eq 'Server') {
-                        # Check for password prompt from the server
                         if ($dataToLog -match $passwordPromptRegex) {
                             $passwordPromptDetected = $true
                         }
@@ -226,38 +227,53 @@ function Start-SessionLogger {
                     }
                     elseif ($logEntry.Source -eq 'User') {
                         if ($passwordPromptDetected) {
-                            # Obfuscate the user's input.
                             $obfuscatedData = '*' * $dataToLog.Length
                             Add-Content -Path $path -Value $obfuscatedData -NoNewline
-                            # If the input contains a newline, the password entry is over.
-                            if ($dataToLog -match "[\r\n]") {
+                            if ($dataToLog -match "[`r`n]") {
                                 $passwordPromptDetected = $false
                             }
-                        } else {
+                        }
+                        else {
                             Add-Content -Path $path -Value $dataToLog -NoNewline
                         }
                     }
                 }
                 else {
-                    # Standard logging if obfuscation is off
                     Add-Content -Path $path -Value $dataToLog -NoNewline
                 }
             }
-            else {
-                Start-Sleep -Milliseconds 100
-            }
+            Start-Sleep -Milliseconds 100
         }
-    } -ArgumentList $LogFilePath, $logQueue, $ObfuscatePasswords.IsPresent, $RawSessionData.IsPresent
+    }
 
+    # Create and start the runspace
+    $runspace = [powershell]::Create()
+    $runspace.AddScript($loggerScript).AddArgument($LogFilePath).AddArgument($logQueue).AddArgument($stopFlag).AddArgument($ObfuscatePasswords.IsPresent).AddArgument($RawSessionData.IsPresent) | Out-Null
+    $runspace.Runspace.ThreadOptions = "ReuseThread"
+    $asyncResult = $runspace.BeginInvoke()
+
+    # Return a PSCustomObject to control and access the logger
     return [PSCustomObject]@{
-        Job   = $logJob
+        Runspace = $runspace
+        AsyncResult = $asyncResult
         Queue = $logQueue
+        StopFlag = $stopFlag
     }
 }
 
-function Stop-SessionLogger($Logger) {
-    if ($Logger -and $Logger.Job) {
-        Stop-Job $Logger.Job | Remove-Job -Force
+function Stop-SessionLogger {
+    param(
+        [Parameter(Mandatory=$true)]
+        $Logger
+    )
+
+    if ($Logger -and $Logger.Runspace) {
+        # Signal stop
+        $Logger.StopFlag.Value = $true
+
+        # Wait for runspace to finish processing remaining items
+        $Logger.Runspace.EndInvoke($Logger.AsyncResult)
+        $Logger.Runspace.Dispose()
     }
 }
 
@@ -317,6 +333,7 @@ function Start-SerialSession {
             foreach ($line in $Config.AutoInput.Split("`n")) {
                 $command = $line.Trim()
                 $Port.WriteLine($command)
+				# Write-Host "Logger in AutoInput: $logger"
                 if ($logger) { $logger.Queue.Enqueue([PSCustomObject]@{Source='User'; Data=($command + "`r`n")}) }
                 Start-Sleep -Milliseconds 200
             }
@@ -326,13 +343,22 @@ function Start-SerialSession {
             $keepAliveJob = Start-SessionKeepAlive -Stream $Port.BaseStream
         }
 
-        $receiveEvent = Register-ObjectEvent -InputObject $port -EventName DataReceived -Action {
-            $p = $event.MessageData.Port
-            $logQueue = $event.MessageData.LoggerQueue
-            $data = $p.ReadExisting()
-            Write-Host $data -NoNewline
-            if ($logQueue) { $logQueue.Enqueue([PSCustomObject]@{Source='Server'; Data=$data}) }
-        } -MessageData ([PSCustomObject]@{Port = $Port; LoggerQueue = $logger.Queue})
+		$receiveEvent = Register-ObjectEvent -InputObject $Port -EventName DataReceived -Action {
+			try {
+				$p = $event.MessageData.Port
+				$log = $event.MessageData.Logger
+				$data = $p.ReadExisting()
+				Write-Host $data -NoNewline
+
+				if ($null -ne $log) {
+					# Write-Host "Logger in Event: $log"
+					$log.Queue.Enqueue([PSCustomObject]@{Source='Server'; Data=$data})
+				}
+			}
+			catch {
+				Write-Warning "Event handler error: $_"
+			}
+		} -MessageData ([PSCustomObject]@{Port = $Port; Logger = $logger})
 
         while ($true) {
             if ([Console]::KeyAvailable) {
@@ -348,7 +374,7 @@ function Start-SerialSession {
                     $output = $key.KeyChar
                     $port.Write($output)
                 }
-
+				# Write-Host "Logger in Loop: $logger"
                 if ($logger -and $Config.RawLogData) { $logger.Queue.Enqueue([PSCustomObject]@{Source='User'; Data=$output}) }
             }
             Start-Sleep -Milliseconds 10
@@ -364,6 +390,29 @@ function Start-SerialSession {
         if ($logger) { Stop-SessionLogger $logger }
         [Console]::TreatControlCAsInput = $false
     }
+}
+
+# Remove ANSI escape sequences from string
+function Remove-AnsiEscapeSequences {
+    param([string]$textinput)
+    if (-not $textinput) { return $textinput }
+
+    $esc = [char]27
+
+    # CSI sequences (ESC [ ... final byte in ASCII range @ to ~)
+    $pattern1 = "$esc\[[0-9;?]*[@-~]"
+
+    # OSC sequences (ESC ] ... terminated by BEL or ESC \)
+    $pattern2 = "$esc\][^\a\e]*([\a]|\e\\)"
+
+    # Single-character ESC sequences
+    $pattern3 = "$esc."
+
+    $cleanedtext = $textinput -replace $pattern1, ''
+    $cleanedtext = $cleanedtext -replace $pattern2, ''
+    $cleanedtext = $cleanedtext -replace $pattern3, ''
+
+    return $cleanedtext
 }
 
 function Start-SshSession {
@@ -436,6 +485,17 @@ function Start-SshSession {
         $inputHelpers.Add("Insert", "$([char]27)[2~")
         $inputHelpers.Add("Tab", "`t")
 
+		# Clear Host locally and set colors again to ensure clean state. --- Lets not do this since the remote end will overwrite this and make the terminal look weird
+		# Clear-Host
+		# $Host.UI.RawUI.ForegroundColor = $global:ConnectionConfig.TextColor
+		# $Host.UI.RawUI.BackgroundColor = $global:ConnectionConfig.BackgroundColor
+		
+		# Increase buffer height to 10000 lines
+		$host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
+
+		# Now display your session start message and optionally print initial output after clearing screen
+		Write-Host "--- SSH Session Started using Posh-SSH. Press ESC in the console to exit. ---`n" -ForegroundColor Green
+
         # Wait a moment for any initial output
         Start-Sleep -Milliseconds 500
 
@@ -443,7 +503,7 @@ function Start-SshSession {
         if ($Config.AutoInput) {
             Write-Host "`nSending auto-input..." -ForegroundColor Cyan
             foreach ($line in $Config.AutoInput.Split("`n")) {
-                $command = $line.Trim() + "`n"
+                $command = $line.Trim() + "`r`n"
                 $bytes = [System.Text.Encoding]::UTF8.GetBytes($command)
                 $shellStream.Write($bytes, 0, $bytes.Length)
                 $shellStream.Flush()
@@ -467,15 +527,6 @@ function Start-SshSession {
 		}
 		
 		Write-Host $initialOutput
-		# Clear Host locally and set colors again to ensure clean state
-		Clear-Host
-		$Host.UI.RawUI.ForegroundColor = $global:ConnectionConfig.TextColor
-		$Host.UI.RawUI.BackgroundColor = $global:ConnectionConfig.BackgroundColor
-		# Increase buffer height to 10000 lines
-		$host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
-
-		# Now display your session start message and optionally print initial output after clearing screen
-		Write-Host "--- SSH Session Started using Posh-SSH. Press ESC in the console to exit. ---`n" -ForegroundColor Green
 
         # Main synchronous loop to read output and handle input
         while ($client.IsConnected) {
@@ -486,7 +537,15 @@ function Start-SshSession {
                 if ($bytesRead -gt 0) {
                     $text = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $bytesRead)
 					Write-Host $text -NoNewline
-                    if ($logger) { $logger.Queue.Enqueue([PSCustomObject]@{Source='Server'; Data=$text}) }
+					if ($logger -and $Config.RawLogData) {
+						# Enqueue raw data including ANSI codes
+						$logger.Queue.Enqueue([PSCustomObject]@{Source='Server'; Data=$text })
+					}
+					elseif ($logger) {
+						# Enqueue cleaned data without ANSI codes
+						$cleanOutput = Remove-AnsiEscapeSequences $text
+						$logger.Queue.Enqueue([PSCustomObject]@{Source='Server'; Data=$cleanOutput })
+					}
                 }
             }
 
@@ -503,11 +562,16 @@ function Start-SshSession {
                 $shellStream.Write($bytes, 0, $bytes.Length)
                 $shellStream.Flush()
 
-                if ($logger -and $Config.RawLogData) {
-                    $logger.Queue.Enqueue([PSCustomObject]@{Source='User'; Data=$output})
-                }
+				if ($logger -and $Config.RawLogData) {
+					# Enqueue raw data including ANSI codes
+					$logger.Queue.Enqueue([PSCustomObject]@{ Source = 'User'; Data = $output })
+				}
+				elseif ($logger) {
+					# Enqueue cleaned data without ANSI codes
+					$cleanOutput = Remove-AnsiEscapeSequences $output
+					$logger.Queue.Enqueue([PSCustomObject]@{ Source = 'User'; Data = $cleanOutput })
+				}
             }
-
             Start-Sleep -Milliseconds 10
         }
     }
@@ -723,7 +787,7 @@ function Show-ConnectionConfigMenu {
     $advY += 30; $cbKeepAlive = $null; Add-ControlPair $gbAdvanced "Keep-Alive" $advY ([ref]$cbKeepAlive) $null "CheckBox" -controlX 160
     $advY += 30; $lblLoggingInfo = New-Object Windows.Forms.Label
 
-    $lblLoggingInfo.Text = "Note: Obfuscation requires Raw Session Data." # Removed SSH warning
+    $lblLoggingInfo.Text = "Note: Raw Session Data also logs ANSI sequences." # Removed SSH warning
     $lblLoggingInfo.Location = New-Object Drawing.Point(10, $advY); $lblLoggingInfo.AutoSize = $true; $lblLoggingInfo.ForeColor = [System.Drawing.Color]::Gray; $gbAdvanced.Controls.Add($lblLoggingInfo)
 
     $gbAutoInput = New-Object Windows.Forms.GroupBox; $gbAutoInput.Text = "Auto-Input on Connect (one command per line)"; $gbAutoInput.Location = New-Object Drawing.Point(10, 540); $gbAutoInput.Size = New-Object Drawing.Size(800, 100); $form.Controls.Add($gbAutoInput)
@@ -750,7 +814,7 @@ function Show-ConnectionConfigMenu {
         $cbLogging.Enabled = $true
         $txtLogFile.Enabled = $cbLogging.Checked
         $cbRawLog.Enabled = $cbLogging.Checked
-        $cbObfuscate.Enabled = $cbLogging.Checked -and $cbRawLog.Checked
+        $cbObfuscate.Enabled = $cbLogging.Checked # -and $cbRawLog.Checked
         $cbKeepAlive.Enabled = $true
     }
 
@@ -809,8 +873,8 @@ function Show-ConnectionConfigMenu {
     $rbSerial.add_CheckedChanged($updateControlsVisibility)
     $rbSsh.add_CheckedChanged($updateControlsVisibility)
     $rbTelnet.add_CheckedChanged($updateControlsVisibility)
-    $cbLogging.add_CheckedChanged({ $txtLogFile.Enabled = $cbLogging.Checked; $cbRawLog.Enabled = $cbLogging.Checked; $cbObfuscate.Enabled = ($cbLogging.Checked -and $cbRawLog.Checked) })
-    $cbRawLog.add_CheckedChanged({ $cbObfuscate.Enabled = ($cbLogging.Checked -and $cbRawLog.Checked) })
+    $cbLogging.add_CheckedChanged({ $txtLogFile.Enabled = $cbLogging.Checked; $cbRawLog.Enabled = $cbLogging.Checked; $cbObfuscate.Enabled = $cbLogging.Checked }) # = ($cbLogging.Checked -and $cbRawLog.Checked) })
+    # $cbRawLog.add_CheckedChanged({ $cbObfuscate.Enabled = ($cbLogging.Checked -and $cbRawLog.Checked) })
 
     $current = $cbProfile.SelectedItem
     $cbProfile.Items.AddRange((Get-ProfileList))
@@ -897,19 +961,21 @@ function Show-ConnectionConfigMenu {
 Show-ConnectionConfigMenu
 
 if ($global:ConnectionConfig) {
-    # Apply appearance settings
-    $Host.UI.RawUI.ForegroundColor = $global:ConnectionConfig.TextColor
-    $Host.UI.RawUI.BackgroundColor = $global:ConnectionConfig.BackgroundColor
-    if ($PSVersionTable.PSEdition -eq 'Desktop') {
-        switch ($global:ConnectionConfig.CursorSize) {
-            "Block" { $Host.UI.RawUI.CursorSize = 100 }
-            "Underline" { $Host.UI.RawUI.CursorSize = 15 }
-            default { $Host.UI.RawUI.CursorSize = 25 }
-        }
-    }
-    Clear-Host
-
     $Config = $global:ConnectionConfig
+    # Apply appearance settings
+	if ($Config.Type -ne "SSH") { # some SSH Hosts hate custom terminal colors and constantly overwrite them with ansi sequences
+		$Host.UI.RawUI.ForegroundColor = $Config.TextColor
+		$Host.UI.RawUI.BackgroundColor = $Config.BackgroundColor
+		if ($PSVersionTable.PSEdition -eq 'Desktop') {
+			switch ($Config.CursorSize) {
+				"Block" { $Host.UI.RawUI.CursorSize = 100 }
+				"Underline" { $Host.UI.RawUI.CursorSize = 15 }
+				default { $Host.UI.RawUI.CursorSize = 25 }
+			}
+		}
+		Clear-Host
+    }
+
     try {
         if ($Config.Type -eq "Serial") {
             $port = New-Object System.IO.Ports.SerialPort
@@ -945,7 +1011,7 @@ if ($global:ConnectionConfig) {
             $Host.UI.RawUI.ForegroundColor = [System.ConsoleColor]::Gray
             $Host.UI.RawUI.BackgroundColor = [System.ConsoleColor]::Black
         }
-        Clear-Host
+        # Clear-Host
         Write-Host "Session terminated" -ForegroundColor Green
     }
 }
