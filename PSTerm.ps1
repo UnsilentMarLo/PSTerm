@@ -357,12 +357,13 @@ function Start-SerialSession {
     try {
         # Apply terminal colors if forced
         if ($Config.ForceTerminalColors) {
-            Clear-Host
             $Host.UI.RawUI.ForegroundColor = $Config.TextColor
             $Host.UI.RawUI.BackgroundColor = $Config.BackgroundColor
-            $host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
+            Clear-Host
         }
         
+		$host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
+		
         if ($Config.BackgroundLogging) {
             $logger = Start-SessionLogger -LogFilePath $Config.LogFilePath -RawSessionData:$Config.RawLogData -ObfuscatePasswords:$Config.ObfuscatePasswords
         }
@@ -450,9 +451,9 @@ function Start-SshSession {
     try {
         # Apply terminal colors if forced
         if ($Config.ForceTerminalColors) {
-            Clear-Host
             $Host.UI.RawUI.ForegroundColor = $Config.TextColor
             $Host.UI.RawUI.BackgroundColor = $Config.BackgroundColor
+            Clear-Host
         }
         # Always increase buffer for better scrollback
         $host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
@@ -596,11 +597,12 @@ function Start-TelnetSession {
     try {
         # Apply terminal colors if forced
         if ($Config.ForceTerminalColors) {
-            Clear-Host
             $Host.UI.RawUI.ForegroundColor = $Config.TextColor
             $Host.UI.RawUI.BackgroundColor = $Config.BackgroundColor
-            $host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
+            Clear-Host
         }
+		
+		$host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
         
         if ($Config.BackgroundLogging) {
             $logger = Start-SessionLogger -LogFilePath $Config.LogFilePath -RawSessionData:$Config.RawLogData -ObfuscatePasswords:$Config.ObfuscatePasswords
