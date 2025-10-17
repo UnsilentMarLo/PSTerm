@@ -722,8 +722,8 @@ function Show-ConnectionConfigMenu {
     $form.FormBorderStyle = 'Sizable'
     $form.AutoScaleMode = 'Dpi'
     $form.AutoSize = $false
-    $form.MinimumSize = New-Object System.Drawing.Size(750, 710)
-    $form.MaximumSize = New-Object System.Drawing.Size(99999, 710)
+ Â  Â $form.MinimumSize = New-Object System.Drawing.Size(750, 710)
+ Â  Â $form.MaximumSize = New-Object System.Drawing.Size(99999, 710)
     $form.AutoSizeMode = 'GrowOnly'
     $form.StartPosition = "CenterScreen"
     $form.Padding = 10
@@ -751,19 +751,19 @@ function Show-ConnectionConfigMenu {
     $gbProfile = New-Object Windows.Forms.GroupBox; $gbProfile.Text = "Profile"; $gbProfile.Dock = 'Fill'
     $mainLayout.Controls.Add($gbProfile, 0, 0); $mainLayout.SetColumnSpan($gbProfile, 2)
 
-    $profileTlp = New-Object Windows.Forms.TableLayoutPanel; $profileTlp.Dock = 'Fill'; $profileTlp.AutoSize = $true; $profileTlp.Padding = 5
-    $profileTlp.ColumnCount = 4 # only add controls to 4 columns (0, 1, 2, 3)
-    $profileTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize')) | Out-Null # Select Profile:
-    $profileTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'Percent', 100)) | Out-Null # ComboBox (Dropdown)
-    $gbProfile.Controls.Add($profileTlp)
+ Â  Â $profileTlp = New-Object Windows.Forms.TableLayoutPanel; $profileTlp.Dock = 'Fill'; $profileTlp.AutoSize = $true; $profileTlp.Padding = 5
+ Â  Â $profileTlp.ColumnCount = 4 # only add controls to 4 columns (0, 1, 2, 3)
+ Â  Â $profileTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize')) | Out-Null # Select Profile:
+ Â  Â $profileTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'Percent', 100)) | Out-Null # ComboBox (Dropdown)
+ Â  Â $gbProfile.Controls.Add($profileTlp)
 
-    $profileTlp.Controls.Add((New-Label "Select Profile:"), 0, 0)
-    $cbProfiles = New-Object Windows.Forms.ComboBox; $cbProfiles.Dock = 'Fill'; $cbProfiles.Items.AddRange((Get-ProfileList)); $cbProfiles.DropDownStyle = 'DropDown'
-    $profileTlp.Controls.Add($cbProfiles, 1, 0)
-    $btnSaveProfile = New-Object Windows.Forms.Button; $btnSaveProfile.Text = "Save" # REMOVE Anchor = 'None'
-    $profileTlp.Controls.Add($btnSaveProfile, 2, 0)
-    $btnDeleteProfile = New-Object Windows.Forms.Button; $btnDeleteProfile.Text = "Delete" # REMOVE Anchor = 'None'
-    $profileTlp.Controls.Add($btnDeleteProfile, 3, 0)
+ Â  Â $profileTlp.Controls.Add((New-Label "Select Profile:"), 0, 0)
+ Â  Â $cbProfiles = New-Object Windows.Forms.ComboBox; $cbProfiles.Dock = 'Fill'; $cbProfiles.Items.AddRange((Get-ProfileList)); $cbProfiles.DropDownStyle = 'DropDown'
+ Â  Â $profileTlp.Controls.Add($cbProfiles, 1, 0)
+ Â  Â $btnSaveProfile = New-Object Windows.Forms.Button; $btnSaveProfile.Text = "Save" # REMOVE Anchor = 'None'
+ Â  Â $profileTlp.Controls.Add($btnSaveProfile, 2, 0)
+ Â  Â $btnDeleteProfile = New-Object Windows.Forms.Button; $btnDeleteProfile.Text = "Delete" # REMOVE Anchor = 'None'
+ Â  Â $profileTlp.Controls.Add($btnDeleteProfile, 3, 0)
 
 
     # --- Left Pane Layout ---
@@ -1038,4 +1038,3 @@ while ($true) {
 }
 
 Write-Host "Script finished."
-
