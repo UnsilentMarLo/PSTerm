@@ -4,7 +4,9 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName Microsoft.VisualBasic
 Add-Type -AssemblyName System
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+if ($Host.Name -eq 'ConsoleHost') {
+    [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+}
 
 # Use PInvoke to hide/show the console window for a cleaner GUI experience
 Add-Type -TypeDefinition @"
@@ -70,7 +72,7 @@ if (-not (Test-Path $ProfilesFile)) {
             Parity              = "None"
             StopBits            = "One"
             Handshake           = "None"
-            RTSEnable           = $false
+            DtrEnable           = $false
             Host                = ""
             User                = ""
             SshPort             = 22
@@ -96,7 +98,7 @@ if (-not (Test-Path $ProfilesFile)) {
             Parity              = "None"
             StopBits            = "One"
             Handshake           = "None"
-            RTSEnable           = $false
+            DtrEnable           = $false
             Host                = ""
             User                = ""
             SshPort             = 22
@@ -122,7 +124,7 @@ if (-not (Test-Path $ProfilesFile)) {
             Parity              = "None"
             StopBits            = "One"
             Handshake           = "None"
-            RTSEnable           = $false
+            DtrEnable           = $false
             Host                = ""
             User                = ""
             SshPort             = 22
@@ -717,97 +719,188 @@ function Show-ConnectionConfigMenu {
 
     $form = New-Object Windows.Forms.Form
     $form.Text = "Connection Configuration"
-    $form.Size = New-Object Drawing.Size(840, 620) # Adjusted height
+    $form.FormBorderStyle = 'Sizable'
+    $form.AutoScaleMode = 'Dpi'
+    $form.AutoSize = $false
+    $form.MinimumSize = New-Object System.Drawing.Size(750, 710)
+    $form.MaximumSize = New-Object System.Drawing.Size(99999, 710)
+    $form.AutoSizeMode = 'GrowOnly'
     $form.StartPosition = "CenterScreen"
-    $form.FormBorderStyle = 'FixedDialog'
+    $form.Padding = 10
 
-    # Helper function to create a label and control pair
-    function Add-ControlPair {
-        param($parent, $labelText, $yPos, [ref]$controlRef, $items = $null, $type = "ComboBox", $controlX = 150, $controlWidth = 250)
-        $lbl = New-Object Windows.Forms.Label; $lbl.Text = $labelText; $lbl.Location = New-Object Drawing.Point(10, $yPos); $lbl.AutoSize = $true; $parent.Controls.Add($lbl)
-        
-        $control = switch ($type) {
-            "ComboBox"  { New-Object Windows.Forms.ComboBox }
-            "CheckBox"  { New-Object Windows.Forms.CheckBox }
-            "TextBox"   { New-Object Windows.Forms.TextBox }
-            default     { New-Object Windows.Forms.TextBox }
-        }
-        
-        if ($type -eq "ComboBox") { $control.DropDownStyle = 'DropDownList'; if ($items) { $control.Items.AddRange($items) } }
-
-        $control.Location = New-Object Drawing.Point($controlX, ($yPos - 3)); $control.Size = New-Object Drawing.Size($controlWidth, 20); $parent.Controls.Add($control)
-        $controlRef.Value = $control
+    # Helper function to create a label
+    function New-Label($text) {
+        $lbl = New-Object Windows.Forms.Label
+        $lbl.Text = $text
+        $lbl.Anchor = 'Left, Top' # CHANGE THIS LINE from 'Left' to 'Left, Top'
+        $lbl.TextAlign = 'MiddleLeft'
+        $lbl.AutoSize = $true
+        return $lbl
     }
 
-    # --- Main Layout Panels ---
-    $gbProfile = New-Object Windows.Forms.GroupBox; $gbProfile.Text = "Profile"; $gbProfile.Location = New-Object Drawing.Point(10, 10); $gbProfile.Size = New-Object Drawing.Size(805, 60); $form.Controls.Add($gbProfile)
-    $gbType = New-Object Windows.Forms.GroupBox; $gbType.Text = "Connection Type"; $gbType.Location = New-Object Drawing.Point(10, 80); $gbType.Size = New-Object Drawing.Size(390, 60); $form.Controls.Add($gbType)
-    $gbConnSpecific = New-Object Windows.Forms.GroupBox; $gbConnSpecific.Text = "Connection Settings"; $gbConnSpecific.Location = New-Object Drawing.Point(10, 150); $gbConnSpecific.Size = New-Object Drawing.Size(390, 220); $form.Controls.Add($gbConnSpecific)
+    # --- Main Layout ---
+    $mainLayout = New-Object Windows.Forms.TableLayoutPanel
+    $mainLayout.Dock = 'Fill'
+    $mainLayout.AutoSize = $false
+    $mainLayout.ColumnCount = 2
+    $mainLayout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'Percent', 50)) | Out-Null
+    $mainLayout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'Percent', 50)) | Out-Null
+    $form.Controls.Add($mainLayout)
+
+    # --- Profile Controls (Row 0) ---
+    $gbProfile = New-Object Windows.Forms.GroupBox; $gbProfile.Text = "Profile"; $gbProfile.Dock = 'Fill'
+    $mainLayout.Controls.Add($gbProfile, 0, 0); $mainLayout.SetColumnSpan($gbProfile, 2)
     
-    $gbAutoInput = New-Object Windows.Forms.GroupBox; $gbAutoInput.Text = "Auto-Input Script"; $gbAutoInput.Location = New-Object Drawing.Point(10, 380); $gbAutoInput.Size = New-Object Drawing.Size(390, 130); $form.Controls.Add($gbAutoInput)
-    $txtAutoInput = New-Object Windows.Forms.TextBox; $txtAutoInput.Multiline = $true; $txtAutoInput.ScrollBars = 'Vertical'; $txtAutoInput.AcceptsReturn = $true; $txtAutoInput.Location = New-Object Drawing.Point(15, 25); $txtAutoInput.Size = New-Object Drawing.Size(360, 90); $gbAutoInput.Controls.Add($txtAutoInput)
+    $profileTlp = New-Object Windows.Forms.TableLayoutPanel; $profileTlp.Dock = 'Fill'; $profileTlp.AutoSize = $true; $profileTlp.Padding = 5
+    $profileTlp.ColumnCount = 4 # only add controls to 4 columns (0, 1, 2, 3)
+    $profileTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize')) | Out-Null # Select Profile:
+    $profileTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'Percent', 100)) | Out-Null # ComboBox (Dropdown)
+    $gbProfile.Controls.Add($profileTlp)
 
-    $gbCommon = New-Object Windows.Forms.GroupBox; $gbCommon.Text = "Terminal & Logging Settings"; $gbCommon.Location = New-Object Drawing.Point(425, 80); $gbCommon.Size = New-Object Drawing.Size(390, 430); $form.Controls.Add($gbCommon)
+    $profileTlp.Controls.Add((New-Label "Select Profile:"), 0, 0)
+    $cbProfiles = New-Object Windows.Forms.ComboBox; $cbProfiles.Dock = 'Fill'; $cbProfiles.Items.AddRange((Get-ProfileList)); $cbProfiles.DropDownStyle = 'DropDown'
+    $profileTlp.Controls.Add($cbProfiles, 1, 0)
+    $btnSaveProfile = New-Object Windows.Forms.Button; $btnSaveProfile.Text = "Save" # REMOVE Anchor = 'None'
+    $profileTlp.Controls.Add($btnSaveProfile, 2, 0)
+    $btnDeleteProfile = New-Object Windows.Forms.Button; $btnDeleteProfile.Text = "Delete" # REMOVE Anchor = 'None'
+    $profileTlp.Controls.Add($btnDeleteProfile, 3, 0)
 
-    # --- Profile Controls ---
-    $cbProfiles = $null; Add-ControlPair $gbProfile "Select Profile" 25 ([ref]$cbProfiles) (Get-ProfileList) "ComboBox" 100 200
-    $cbProfiles.DropDownStyle = 'DropDown' # Allow typing new profile names
-    $btnSaveProfile = New-Object Windows.Forms.Button; $btnSaveProfile.Text = "Save"; $btnSaveProfile.Location = New-Object Drawing.Point(310, 22); $gbProfile.Controls.Add($btnSaveProfile)
-    $btnDeleteProfile = New-Object Windows.Forms.Button; $btnDeleteProfile.Text = "Delete"; $btnDeleteProfile.Location = New-Object Drawing.Point(390, 22); $gbProfile.Controls.Add($btnDeleteProfile)
 
-    # --- Connection Type Controls ---
-    $rbSerial = New-Object Windows.Forms.RadioButton; $rbSerial.Text = "Serial"; $rbSerial.Location = New-Object Drawing.Point(20, 25); $rbSerial.AutoSize = $true; $gbType.Controls.Add($rbSerial)
-    $rbSsh = New-Object Windows.Forms.RadioButton; $rbSsh.Text = "SSH"; $rbSsh.Location = New-Object Drawing.Point(140, 25); $rbSsh.AutoSize = $true; $gbType.Controls.Add($rbSsh)
-    $rbTelnet = New-Object Windows.Forms.RadioButton; $rbTelnet.Text = "Telnet"; $rbTelnet.Location = New-Object Drawing.Point(260, 25); $rbTelnet.AutoSize = $true; $gbType.Controls.Add($rbTelnet)
+    # --- Left Pane Layout ---
+    $leftPane = New-Object Windows.Forms.TableLayoutPanel; $leftPane.Dock = 'Fill'; $leftPane.AutoSize = $true
+    $mainLayout.Controls.Add($leftPane, 0, 1)
 
-    # --- Connection-Specific Panels (to be placed inside $gbConnSpecific) ---
-    $pnlSerial = New-Object Windows.Forms.Panel; $pnlSerial.Dock = 'Fill'; $gbConnSpecific.Controls.Add($pnlSerial)
-    $pnlSsh = New-Object Windows.Forms.Panel; $pnlSsh.Dock = 'Fill'; $pnlSsh.Visible = $false; $gbConnSpecific.Controls.Add($pnlSsh)
-    $pnlTelnet = New-Object Windows.Forms.Panel; $pnlTelnet.Dock = 'Fill'; $pnlTelnet.Visible = $false; $gbConnSpecific.Controls.Add($pnlTelnet)
+    # --- Connection Type (Left Pane Row 0) ---
+    $gbType = New-Object Windows.Forms.GroupBox; $gbType.Text = "Connection Type"; $gbType.Dock = 'Fill'; $gbType.AutoSize = $true
+    $leftPane.Controls.Add($gbType, 0, 0)
+    $typeFlow = New-Object Windows.Forms.FlowLayoutPanel; $typeFlow.Dock = 'Fill'; $typeFlow.AutoSize = $true; $typeFlow.Padding = 5
+    $gbType.Controls.Add($typeFlow)
+    $rbSerial = New-Object Windows.Forms.RadioButton; $rbSerial.Text = "Serial"; $rbSerial.AutoSize = $true
+    $rbSsh = New-Object Windows.Forms.RadioButton; $rbSsh.Text = "SSH"; $rbSsh.AutoSize = $true
+    $rbTelnet = New-Object Windows.Forms.RadioButton; $rbTelnet.Text = "Telnet"; $rbTelnet.AutoSize = $true
+    $typeFlow.Controls.AddRange(@($rbSerial, $rbSsh, $rbTelnet))
 
-    # Serial Controls
-    $serialY = 25; $cbPort = $null; Add-ControlPair $pnlSerial "COM Port" $serialY ([ref]$cbPort) ([System.IO.Ports.SerialPort]::GetPortNames()) "ComboBox" 120 250
-    $serialY += 30; $cbBaud = $null; Add-ControlPair $pnlSerial "Baud Rate" $serialY ([ref]$cbBaud) @("9600", "19200", "38400", "57600", "115200") "ComboBox" 120 250
-    $serialY += 30; $cbDataBits = $null; Add-ControlPair $pnlSerial "Data Bits" $serialY ([ref]$cbDataBits) @("8", "7") "ComboBox" 120 250
-    $serialY += 30; $cbParity = $null; Add-ControlPair $pnlSerial "Parity" $serialY ([ref]$cbParity) ([enum]::GetNames([System.IO.Ports.Parity])) "ComboBox" 120 250
-    $serialY += 30; $cbStopBits = $null; Add-ControlPair $pnlSerial "Stop Bits" $serialY ([ref]$cbStopBits) ([enum]::GetNames([System.IO.Ports.StopBits])) "ComboBox" 120 250
-    $serialY += 30; $cbHandshake = $null; Add-ControlPair $pnlSerial "Handshake" $serialY ([ref]$cbHandshake) ([enum]::GetNames([System.IO.Ports.Handshake])) "ComboBox" 120 250
+    # --- Connection Specifics (Left Pane Row 1) ---
+    $gbConnSpecific = New-Object Windows.Forms.GroupBox; $gbConnSpecific.Text = "Connection Settings"; $gbConnSpecific.Dock = 'Fill'; $gbConnSpecific.AutoSize = $true
+    $leftPane.Controls.Add($gbConnSpecific, 0, 1)
 
-    # SSH Controls
-    $sshY = 25; $txtSshHost = $null; Add-ControlPair $pnlSsh "Host / IP" $sshY ([ref]$txtSshHost) $null "TextBox" 120 250
-    $sshY += 30; $txtSshUser = $null; Add-ControlPair $pnlSsh "Username" $sshY ([ref]$txtSshUser) $null "TextBox" 120 250
-    $sshY += 30; $txtSshPort = $null; Add-ControlPair $pnlSsh "Port" $sshY ([ref]$txtSshPort) $null "TextBox" 120 250
+    # Helper to build a settings panel
+    function New-SettingsPanel {
+        $tlp = New-Object Windows.Forms.TableLayoutPanel
+        $tlp.Dock = 'Fill'; $tlp.AutoSize = $true; $tlp.Padding = 5; $tlp.ColumnCount = 3
+        $tlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize')) | Out-Null
+        $tlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'Percent', 100)) | Out-Null
+        return $tlp
+    }
 
-    # Telnet Controls
-    $telnetY = 25; $txtTelnetHost = $null; Add-ControlPair $pnlTelnet "Host / IP" $telnetY ([ref]$txtTelnetHost) $null "TextBox" 120 250
-    $telnetY += 30; $txtTelnetPort = $null; Add-ControlPair $pnlTelnet "Port" $telnetY ([ref]$txtTelnetPort) $null "TextBox" 120 250
+    # Serial Panel
+    $pnlSerial = New-SettingsPanel
+    $gbConnSpecific.Controls.Add($pnlSerial)
+    $pnlSerial.Controls.Add((New-Label "COM Port:"), 0, 0); 
+    $pnlSerial.Controls.Add((New-Label "Baud Rate:"), 0, 1);
+    $pnlSerial.Controls.Add((New-Label "Data Bits:"), 0, 2);
+    $pnlSerial.Controls.Add((New-Label "Parity:"), 0, 3);
+    $pnlSerial.Controls.Add((New-Label "Stop Bits:"), 0, 4);
+    $pnlSerial.Controls.Add((New-Label "Handshake:"), 0, 5);
+    $pnlSerial.Controls.Add((New-Label "Enable DTR:"), 0, 6);
 
-    # --- Common Settings Controls ---
-    $commonY = 25; $allColors = [System.Enum]::GetNames([System.ConsoleColor])
-    $cbTextColor = $null; Add-ControlPair $gbCommon "Text Color" $commonY ([ref]$cbTextColor) $allColors "ComboBox" 160 200
-    $commonY += 30; $cbBgColor = $null; Add-ControlPair $gbCommon "Background Color" $commonY ([ref]$cbBgColor) $allColors "ComboBox" 160 200
-    $commonY += 30; $cbCursorSize = $null; Add-ControlPair $gbCommon "Cursor Size" $commonY ([ref]$cbCursorSize) @("Normal", "Small", "Large") "ComboBox" 160 200
-    $commonY += 35; $chkForceColors = $null; Add-ControlPair $gbCommon "Force Terminal Colors" $commonY ([ref]$chkForceColors) $null "CheckBox" 160 20
-    $commonY += 30; $chkKeepAlive = $null; Add-ControlPair $gbCommon "Send Keep-Alive" $commonY ([ref]$chkKeepAlive) $null "CheckBox" 160 20
+    $cbPort = New-Object Windows.Forms.ComboBox; $cbPort.DropDownStyle = 'DropDownList'; $cbPort.Dock = 'Fill'
+    $btnRefreshPorts = New-Object Windows.Forms.Button; $btnRefreshPorts.Text = "Refresh"; $btnRefreshPorts.AutoSize = $true
+    $portTlp = New-Object Windows.Forms.TableLayoutPanel; $portTlp.Dock = 'Fill'; $portTlp.ColumnCount=1
+    $portTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'Percent', 100)) | Out-Null
+    $portTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize')) | Out-Null
+    $portTlp.Controls.AddRange(@($cbPort, $btnRefreshPorts))
+    $pnlSerial.Controls.Add($portTlp, 1, 0)
     
-    $commonY += 40 # Spacer for logging section
+    $cbBaud = New-Object Windows.Forms.ComboBox; $cbBaud.DropDownStyle = 'DropDownList'; $cbBaud.Dock = 'Fill'; $cbBaud.Items.AddRange(@("9600", "19200", "38400", "57600", "115200"))
+    $pnlSerial.Controls.Add($cbBaud, 1, 1)
+    $cbDataBits = New-Object Windows.Forms.ComboBox; $cbDataBits.DropDownStyle = 'DropDownList'; $cbDataBits.Dock = 'Fill'; $cbDataBits.Items.AddRange(@("8", "7"))
+    $pnlSerial.Controls.Add($cbDataBits, 1, 2)
+    $cbParity = New-Object Windows.Forms.ComboBox; $cbParity.DropDownStyle = 'DropDownList'; $cbParity.Dock = 'Fill'; $cbParity.Items.AddRange(([enum]::GetNames([System.IO.Ports.Parity])))
+    $pnlSerial.Controls.Add($cbParity, 1, 3)
+    $cbStopBits = New-Object Windows.Forms.ComboBox; $cbStopBits.DropDownStyle = 'DropDownList'; $cbStopBits.Dock = 'Fill'; $cbStopBits.Items.AddRange(([enum]::GetNames([System.IO.Ports.StopBits])))
+    $pnlSerial.Controls.Add($cbStopBits, 1, 4)
+    $cbHandshake = New-Object Windows.Forms.ComboBox; $cbHandshake.DropDownStyle = 'DropDownList'; $cbHandshake.Dock = 'Fill'; $cbHandshake.Items.AddRange(([enum]::GetNames([System.IO.Ports.Handshake])))
+    $pnlSerial.Controls.Add($cbHandshake, 1, 5)
+    $chkDtrEnable = New-Object Windows.Forms.CheckBox; $chkDtrEnable.Anchor = 'Left'
+    $pnlSerial.Controls.Add($chkDtrEnable, 1, 6)
     
-    # Logging Controls
-    $chkBackgroundLogging = $null; Add-ControlPair $gbCommon "Enable Logging" $commonY ([ref]$chkBackgroundLogging) $null "CheckBox" 160 20
-    $commonY += 30; $txtLogFilePath = $null; Add-ControlPair $gbCommon "Log File Path" $commonY ([ref]$txtLogFilePath) $null "TextBox" 160 200
-    $btnBrowseLog = New-Object Windows.Forms.Button; $btnBrowseLog.Text = "..."; $btnBrowseLog.Location = New-Object Drawing.Point(365, ($commonY - 4)); $btnBrowseLog.Size = New-Object Drawing.Size(20, 24); $gbCommon.Controls.Add($btnBrowseLog)
-    $commonY += 30; $chkRawLogData = $null; Add-ControlPair $gbCommon "Log Raw Stream Data" $commonY ([ref]$chkRawLogData) $null "CheckBox" 160 20
-    $commonY += 30; $chkObfuscate = $null; Add-ControlPair $gbCommon "Obfuscate Passwords" $commonY ([ref]$chkObfuscate) $null "CheckBox" 160 20
+    # SSH Panel
+    $pnlSsh = New-SettingsPanel; $pnlSsh.Visible = $false
+    $gbConnSpecific.Controls.Add($pnlSsh)
+    $pnlSsh.Controls.Add((New-Label "Host / IP:"), 0, 0); $txtSshHost = New-Object Windows.Forms.TextBox; $txtSshHost.Dock = 'Fill'; $pnlSsh.Controls.Add($txtSshHost, 1, 0)
+    $pnlSsh.Controls.Add((New-Label "Username:"), 0, 1); $txtSshUser = New-Object Windows.Forms.TextBox; $txtSshUser.Dock = 'Fill'; $pnlSsh.Controls.Add($txtSshUser, 1, 1)
+    $pnlSsh.Controls.Add((New-Label "Port:"), 0, 2); $txtSshPort = New-Object Windows.Forms.TextBox; $txtSshPort.Dock = 'Fill'; $pnlSsh.Controls.Add($txtSshPort, 1, 2)
 
-    # --- Bottom Buttons ---
-    $btnConnect = New-Object Windows.Forms.Button; $btnConnect.Text = "Connect"; $btnConnect.DialogResult = [Windows.Forms.DialogResult]::OK; $btnConnect.Location = New-Object Drawing.Point(320, 530); $btnConnect.Size = New-Object Drawing.Size(100, 40); $form.Controls.Add($btnConnect)
-    $btnCancel = New-Object Windows.Forms.Button; $btnCancel.Text = "Cancel"; $btnCancel.DialogResult = [Windows.Forms.DialogResult]::Cancel; $btnCancel.Location = New-Object Drawing.Point(430, 530); $btnCancel.Size = New-Object Drawing.Size(100, 40); $form.Controls.Add($btnCancel)
+    # Telnet Panel
+    $pnlTelnet = New-SettingsPanel; $pnlTelnet.Visible = $false
+    $gbConnSpecific.Controls.Add($pnlTelnet)
+    $pnlTelnet.Controls.Add((New-Label "Host / IP:"), 0, 0); $txtTelnetHost = New-Object Windows.Forms.TextBox; $txtTelnetHost.Dock = 'Fill'; $pnlTelnet.Controls.Add($txtTelnetHost, 1, 0)
+    $pnlTelnet.Controls.Add((New-Label "Port:"), 0, 1); $txtTelnetPort = New-Object Windows.Forms.TextBox; $txtTelnetPort.Dock = 'Fill'; $pnlTelnet.Controls.Add($txtTelnetPort, 1, 1)
+
+    # --- Auto-Input (Left Pane Row 2) ---
+    $gbAutoInput = New-Object Windows.Forms.GroupBox; $gbAutoInput.Text = "Auto-Input Script"; $gbAutoInput.Dock = 'Fill'
+    $leftPane.Controls.Add($gbAutoInput, 0, 2)
+    $txtAutoInput = New-Object Windows.Forms.TextBox; $txtAutoInput.Multiline = $true; $txtAutoInput.ScrollBars = 'Vertical'; $txtAutoInput.AcceptsReturn = $true; $txtAutoInput.Dock = 'Fill'; $txtAutoInput.Height = 80
+    $gbAutoInput.Controls.Add($txtAutoInput)
+
+
+    # --- Right Pane (Common and Logging) ---
+    $gbCommon = New-Object Windows.Forms.GroupBox; $gbCommon.Text = "Terminal and Logging"; $gbCommon.Dock = 'Fill'
+    $mainLayout.Controls.Add($gbCommon, 1, 1); $mainLayout.SetRowSpan($gbCommon, 2)
+    $commonTlp = New-SettingsPanel
+    $gbCommon.Controls.Add($commonTlp)
+    
+    $allColors = [System.Enum]::GetNames([System.ConsoleColor])
+    $commonTlp.Controls.Add((New-Label "Text Color:"), 0, 0); $cbTextColor = New-Object Windows.Forms.ComboBox; $cbTextColor.DropDownStyle = 'DropDownList'; $cbTextColor.Dock = 'Fill'; $cbTextColor.Items.AddRange($allColors); $commonTlp.Controls.Add($cbTextColor, 1, 0)
+    $commonTlp.Controls.Add((New-Label "Background Color:"), 0, 1); $cbBgColor = New-Object Windows.Forms.ComboBox; $cbBgColor.DropDownStyle = 'DropDownList'; $cbBgColor.Dock = 'Fill'; $cbBgColor.Items.AddRange($allColors); $commonTlp.Controls.Add($cbBgColor, 1, 1)
+    $commonTlp.Controls.Add((New-Label "Cursor Size:"), 0, 2); $cbCursorSize = New-Object Windows.Forms.ComboBox; $cbCursorSize.DropDownStyle = 'DropDownList'; $cbCursorSize.Dock = 'Fill'; $cbCursorSize.Items.AddRange(@("Normal", "Small", "Large")); $commonTlp.Controls.Add($cbCursorSize, 1, 2)
+    $commonTlp.Controls.Add((New-Label "Force Terminal Colors:"), 0, 3); $chkForceColors = New-Object Windows.Forms.CheckBox; $chkForceColors.Anchor = 'Left'; $commonTlp.Controls.Add($chkForceColors, 1, 3)
+    $commonTlp.Controls.Add((New-Label "Send Keep-Alive:"), 0, 4); $chkKeepAlive = New-Object Windows.Forms.CheckBox; $chkKeepAlive.Anchor = 'Left'; $commonTlp.Controls.Add($chkKeepAlive, 1, 4)
+    
+    $commonTlp.Controls.Add((New-Label "Enable Logging:"), 0, 5); $chkBackgroundLogging = New-Object Windows.Forms.CheckBox; $chkBackgroundLogging.Anchor = 'Left'; $commonTlp.Controls.Add($chkBackgroundLogging, 1, 5)
+    $commonTlp.Controls.Add((New-Label "Log File Path:"), 0, 6)
+    $txtLogFilePath = New-Object Windows.Forms.TextBox; $txtLogFilePath.Dock = 'Fill'
+    $btnBrowseLog = New-Object Windows.Forms.Button; $btnBrowseLog.Text = "..."; $btnBrowseLog.AutoSize = $true
+    $logFileTlp = New-Object Windows.Forms.TableLayoutPanel; $logFileTlp.Dock = 'Fill'; $logFileTlp.ColumnCount=2
+    $logFileTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'Percent', 100)) | Out-Null
+    $logFileTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize')) | Out-Null
+    $logFileTlp.Controls.AddRange(@($txtLogFilePath, $btnBrowseLog))
+    $commonTlp.Controls.Add($logFileTlp, 1, 6)
+    
+    $commonTlp.Controls.Add((New-Label "Log Raw Stream Data:"), 0, 7); $chkRawLogData = New-Object Windows.Forms.CheckBox; $chkRawLogData.Anchor = 'Left'; $commonTlp.Controls.Add($chkRawLogData, 1, 7)
+    $commonTlp.Controls.Add((New-Label "Obfuscate Passwords:"), 0, 8); $chkObfuscate = New-Object Windows.Forms.CheckBox; $chkObfuscate.Anchor = 'Left'; $commonTlp.Controls.Add($chkObfuscate, 1, 8)
+
+    # --- Bottom Buttons (Row 2) ---
+    $buttonsFlow = New-Object Windows.Forms.FlowLayoutPanel
+    $buttonsFlow.Dock = 'Fill'
+    $buttonsFlow.FlowDirection = 'RightToLeft'
+    $mainLayout.Controls.Add($buttonsFlow, 0, 2); $mainLayout.SetColumnSpan($buttonsFlow, 2)
+    $btnConnect = New-Object Windows.Forms.Button; $btnConnect.Text = "Connect"; $btnConnect.DialogResult = [Windows.Forms.DialogResult]::OK; $btnConnect.Width = 100; $btnConnect.Height = 30
+    $btnCancel = New-Object Windows.Forms.Button; $btnCancel.Text = "Cancel"; $btnCancel.DialogResult = [Windows.Forms.DialogResult]::Cancel; $btnCancel.Width = 100; $btnCancel.Height = 30
+    $buttonsFlow.Controls.AddRange(@($btnCancel, $btnConnect))
 
     # --- Event Handlers & Logic ---
+    $currentPorts = @()
+    $RefreshPortsAction = {
+        param($forceUpdate = $false)
+        $newPorts = [System.IO.Ports.SerialPort]::GetPortNames()
+        if ($forceUpdate -or (Compare-Object $currentPorts $newPorts)) {
+            $selectedPort = $cbPort.Text
+            $cbPort.Items.Clear(); $cbPort.Items.AddRange($newPorts)
+            if ($newPorts -contains $selectedPort) { $cbPort.Text = $selectedPort }
+            elseif ($newPorts.Count -gt 0 -and $cbPort.IsHandleCreated) { $cbPort.SelectedIndex = 0 }
+            $currentPorts = $newPorts
+        }
+    }
+    $btnRefreshPorts.add_Click({ $RefreshPortsAction.Invoke($true) })
+    $portRefreshTimer = New-Object System.Windows.Forms.Timer; $portRefreshTimer.Interval = 2000
+    $portRefreshTimer.add_Tick({ $RefreshPortsAction.Invoke($false) })
+    $form.add_Load({ $RefreshPortsAction.Invoke($true); $portRefreshTimer.Start() })
+    $form.add_FormClosing({ $portRefreshTimer.Stop(); $portRefreshTimer.Dispose() })
+
     $UpdateFormForType = {
-        $pnlSerial.Visible = $rbSerial.Checked
-        $pnlSsh.Visible = $rbSsh.Checked
-        $pnlTelnet.Visible = $rbTelnet.Checked
+        $pnlSerial.Visible = $rbSerial.Checked; $pnlSsh.Visible = $rbSsh.Checked; $pnlTelnet.Visible = $rbTelnet.Checked
     }
     $rbSerial.add_CheckedChanged($UpdateFormForType); $rbSsh.add_CheckedChanged($UpdateFormForType); $rbTelnet.add_CheckedChanged($UpdateFormForType)
 
@@ -819,12 +912,11 @@ function Show-ConnectionConfigMenu {
             "SSH"    { $rbSsh.Checked = $true }
             "Telnet" { $rbTelnet.Checked = $true }
         }
-        $cbPort.Text = $profile.COMPort; $cbBaud.Text = $profile.BaudRate; $cbDataBits.Text = $profile.DataBits; $cbParity.Text = $profile.Parity; $cbStopBits.Text = $profile.StopBits; $cbHandshake.Text = $profile.Handshake
+        $cbPort.Text = $profile.COMPort; $cbBaud.Text = $profile.BaudRate; $cbDataBits.Text = $profile.DataBits; $cbParity.Text = $profile.Parity; $cbStopBits.Text = $profile.StopBits; $cbHandshake.Text = $profile.Handshake; $chkDtrEnable.Checked = $profile.DtrEnable
         $txtSshHost.Text = $profile.Host; $txtSshUser.Text = $profile.User; $txtSshPort.Text = $profile.SshPort
         $txtTelnetHost.Text = $profile.Host; $txtTelnetPort.Text = $profile.TelnetPort
         $cbTextColor.Text = $profile.TextColor; $cbBgColor.Text = $profile.BackgroundColor; $cbCursorSize.Text = $profile.CursorSize
-        $chkForceColors.Checked = $profile.ForceTerminalColors
-        $chkKeepAlive.Checked = $profile.KeepAlive
+        $chkForceColors.Checked = $profile.ForceTerminalColors; $chkKeepAlive.Checked = $profile.KeepAlive
         $txtAutoInput.Text = $profile.AutoInput
         $chkBackgroundLogging.Checked = $profile.BackgroundLogging; $txtLogFilePath.Text = $profile.LogFilePath; $chkRawLogData.Checked = $profile.RawLogData; $chkObfuscate.Checked = $profile.ObfuscatePasswords
     }
@@ -834,111 +926,57 @@ function Show-ConnectionConfigMenu {
         $profileName = $cbProfiles.Text
         if ([string]::IsNullOrWhiteSpace($profileName)) { [Windows.Forms.MessageBox]::Show("Please enter a profile name.", "Error", "OK", "Error"); return }
         $config = [PSCustomObject]@{
-            Name                = $profileName
-            Type                = if ($rbSerial.Checked) { "Serial" } elseif ($rbSsh.Checked) { "SSH" } else { "Telnet" }
-            COMPort             = $cbPort.Text
-            BaudRate            = $cbBaud.Text
-            DataBits            = $cbDataBits.Text
-            Parity              = $cbParity.Text
-            StopBits            = $cbStopBits.Text
-            Handshake           = $cbHandshake.Text
-            Host                = if ($rbSsh.Checked) { $txtSshHost.Text } elseif ($rbTelnet.Checked) { $txtTelnetHost.Text } else { $txtSshHost.Text }
-            User                = $txtSshUser.Text
-            SshPort             = $txtSshPort.Text
-            TelnetPort          = $txtTelnetPort.Text
-            TextColor           = $cbTextColor.Text
-            BackgroundColor     = $cbBgColor.Text
-            CursorSize          = $cbCursorSize.Text
-            ForceTerminalColors = $chkForceColors.Checked
-            KeepAlive           = $chkKeepAlive.Checked
-            AutoInput           = $txtAutoInput.Text
-            BackgroundLogging   = $chkBackgroundLogging.Checked
-            LogFilePath         = $txtLogFilePath.Text
-            RawLogData          = $chkRawLogData.Checked
-            ObfuscatePasswords  = $chkObfuscate.Checked
+            Name = $profileName; Type = if ($rbSerial.Checked) { "Serial" } elseif ($rbSsh.Checked) { "SSH" } else { "Telnet" }
+            COMPort = $cbPort.Text; BaudRate = $cbBaud.Text; DataBits = $cbDataBits.Text; Parity = $cbParity.Text; StopBits = $cbStopBits.Text; Handshake = $cbHandshake.Text; DtrEnable = $chkDtrEnable.Checked
+            Host = if ($rbSsh.Checked) { $txtSshHost.Text } elseif ($rbTelnet.Checked) { $txtTelnetHost.Text } else { $txtSshHost.Text }
+            User = $txtSshUser.Text; SshPort = $txtSshPort.Text; TelnetPort = $txtTelnetPort.Text
+            TextColor = $cbTextColor.Text; BackgroundColor = $cbBgColor.Text; CursorSize = $cbCursorSize.Text
+            ForceTerminalColors = $chkForceColors.Checked; KeepAlive = $chkKeepAlive.Checked; AutoInput = $txtAutoInput.Text
+            BackgroundLogging = $chkBackgroundLogging.Checked; LogFilePath = $txtLogFilePath.Text; RawLogData = $chkRawLogData.Checked; ObfuscatePasswords = $chkObfuscate.Checked
         }
         Save-Profile $profileName $config
         [Windows.Forms.MessageBox]::Show("Profile '$profileName' saved.", "Success", "OK", "Information")
-        
-        # BUGFIX: Clear and reload the profile list from the source of truth (JSON file).
-        $cbProfiles.Items.Clear()
-        $cbProfiles.Items.AddRange((Get-ProfileList))
-        $cbProfiles.Text = $profileName
+        $cbProfiles.Items.Clear(); $cbProfiles.Items.AddRange((Get-ProfileList)); $cbProfiles.Text = $profileName
     })
-
 	$btnDeleteProfile.add_Click({
 		$profileName = $cbProfiles.Text
-
-		if ([string]::IsNullOrWhiteSpace($profileName)) {
-			[Windows.Forms.MessageBox]::Show("Please select a profile to delete.", "Error", "OK", "Error")
-			return
-		}
-
-		$confirm = [Windows.Forms.MessageBox]::Show(
-			"Are you sure you want to delete profile '$profileName'?",
-			"Confirm Delete",
-			[Windows.Forms.MessageBoxButtons]::YesNo,
-			[Windows.Forms.MessageBoxIcon]::Question
-		)
-
-		if ($confirm -eq [Windows.Forms.DialogResult]::Yes) {
+		if ([string]::IsNullOrWhiteSpace($profileName)) { [Windows.Forms.MessageBox]::Show("Please select a profile to delete.", "Error", "OK", "Error"); return }
+		$confirm = [Windows.Forms.MessageBox]::Show("Are you sure you want to delete profile '$profileName'?", "Confirm Delete", 'YesNo', 'Question')
+		if ($confirm -eq 'Yes') {
 			if ($ProfilesFile -and (Test-Path $ProfilesFile)) {
 				$profiles = @(Get-Content -Raw -Path $ProfilesFile | ConvertFrom-Json)
 				$profiles = $profiles | Where-Object { $_.Name -ne $profileName }
 				$profiles | ConvertTo-Json -Depth 5 | Set-Content -Path $ProfilesFile -Encoding UTF8
 			}
-
-			# Remove from UI
-			$cbProfiles.Items.Remove($profileName)
-			$cbProfiles.Text = ""
+			$cbProfiles.Items.Remove($profileName); $cbProfiles.Text = ""
 			[Windows.Forms.MessageBox]::Show("Profile '$profileName' deleted.", "Success", "OK", "Information")
 		}
 	})
-
     $btnBrowseLog.add_Click({
-        $saveFileDialog = New-Object Windows.Forms.SaveFileDialog
-        $saveFileDialog.Filter = "Log Files (*.log)|*.log|All Files (*.*)|*.*"
-        if ($saveFileDialog.ShowDialog() -eq "OK") {
-            $txtLogFilePath.Text = $saveFileDialog.FileName
-        }
+        $sfd = New-Object Windows.Forms.SaveFileDialog; $sfd.Filter = "Log Files (*.log)|*.log|All Files (*.*)|*.*"
+        if ($sfd.ShowDialog() -eq "OK") { $txtLogFilePath.Text = $sfd.FileName }
     })
 
     # Initial load
-    $LoadProfileIntoForm.Invoke((Import-Profile "Default-SSH"))
-    $cbProfiles.Text = "Default-SSH"
-
+    $LoadProfileIntoForm.Invoke((Import-Profile "Default-Serial")); $cbProfiles.Text = "Default-Serial"
+    
     $form.Add_Shown({ $form.Activate() })
     $result = $form.ShowDialog()
 
+    [int]$sshPort = 22; [int]::TryParse($txtSshPort.Text, [ref]$sshPort) | Out-Null
+    [int]$telnetPort = 23; [int]::TryParse($txtTelnetPort.Text, [ref]$telnetPort) | Out-Null
+
     if ($result -eq [Windows.Forms.DialogResult]::OK) {
-        # Construct config object from form state to pass to session handler
         $global:ConnectionConfig = [PSCustomObject]@{
-            Name                = $cbProfiles.Text
-            Type                = if ($rbSerial.Checked) { "Serial" } elseif ($rbSsh.Checked) { "SSH" } else { "Telnet" }
-            COMPort             = $cbPort.Text
-            BaudRate            = [int]$cbBaud.Text
-            DataBits            = [int]$cbDataBits.Text
-            Parity              = $cbParity.Text
-            StopBits            = $cbStopBits.Text
-            Handshake           = $cbHandshake.Text
-            RTSEnable           = $false # This was not in the GUI, setting a default
-            Host                = if ($rbSsh.Checked) { $txtSshHost.Text } elseif ($rbTelnet.Checked) { $txtTelnetHost.Text } else { "" }
-            User                = $txtSshUser.Text
-            SshPort             = [int]$txtSshPort.Text
-            TelnetPort          = [int]$txtTelnetPort.Text
-            TextColor           = $cbTextColor.Text
-            BackgroundColor     = $cbBgColor.Text
-            CursorSize          = $cbCursorSize.Text
-            ForceTerminalColors = $chkForceColors.Checked
-            KeepAlive           = $chkKeepAlive.Checked
-            AutoInput           = $txtAutoInput.Text.Replace("`r`n", "`n")
-            BackgroundLogging   = $chkBackgroundLogging.Checked
-            LogFilePath         = $txtLogFilePath.Text
-            RawLogData          = $chkRawLogData.Checked
-            ObfuscatePasswords  = $chkObfuscate.Checked
+            Name = $cbProfiles.Text; Type = if ($rbSerial.Checked) { "Serial" } elseif ($rbSsh.Checked) { "SSH" } else { "Telnet" }
+            COMPort = $cbPort.Text; BaudRate = [int]$cbBaud.Text; DataBits = [int]$cbDataBits.Text; Parity = $cbParity.Text; StopBits = $cbStopBits.Text; Handshake = $cbHandshake.Text; DtrEnable = $chkDtrEnable.Checked
+            Host = if ($rbSsh.Checked) { $txtSshHost.Text } elseif ($rbTelnet.Checked) { $txtTelnetHost.Text } else { "" }; User = $txtSshUser.Text; SshPort = $sshPort; TelnetPort = $telnetPort
+            TextColor = $cbTextColor.Text; BackgroundColor = $cbBgColor.Text; CursorSize = $cbCursorSize.Text
+            ForceTerminalColors = $chkForceColors.Checked; KeepAlive = $chkKeepAlive.Checked
+            AutoInput = $txtAutoInput.Text.Replace("`r`n", "`n"); BackgroundLogging = $chkBackgroundLogging.Checked
+            LogFilePath = $txtLogFilePath.Text; RawLogData = $chkRawLogData.Checked; ObfuscatePasswords = $chkObfuscate.Checked
         }
     }
-    
     [ConsoleUtils]::ShowWindow($consoleHandle, 5) # Show console
     $form.Dispose()
     return $result
@@ -975,6 +1013,7 @@ while ($true) {
                 if ([string]::IsNullOrWhiteSpace($config.COMPort)) { throw "No COM Port selected." }
                 $port = New-Object System.IO.Ports.SerialPort($config.COMPort, $config.BaudRate, $config.Parity, $config.DataBits, $config.StopBits)
                 $port.Handshake = $config.Handshake
+                $port.DtrEnable = $config.DtrEnable
                 $port.Open()
                 Start-SerialSession -Port $port -Config $config
                 $port.Close()
@@ -999,3 +1038,4 @@ while ($true) {
 }
 
 Write-Host "Script finished."
+
