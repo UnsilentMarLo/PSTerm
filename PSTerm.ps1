@@ -719,14 +719,13 @@ function Show-ConnectionConfigMenu {
 
     $form = New-Object Windows.Forms.Form
     $form.Text = "Connection Configuration"
-    $form.FormBorderStyle = 'Sizable'
+    $form.FormBorderStyle = 'FixedSingle'
+    $form.MaximizeBox = $false
     $form.AutoScaleMode = 'Dpi'
-    $form.AutoSize = $false
-    $form.MinimumSize = New-Object System.Drawing.Size(750, 710)
-    $form.MaximumSize = New-Object System.Drawing.Size(99999, 710)
-    $form.AutoSizeMode = 'GrowOnly'
+    $form.AutoSize = $true
+    $form.AutoSizeMode = 'GrowAndShrink'
     $form.StartPosition = "CenterScreen"
-    $form.Padding = 10
+    #$form.Padding = 10
 
     # Helper function to create a label
     function New-Label($text) {
@@ -741,29 +740,30 @@ function Show-ConnectionConfigMenu {
     # --- Main Layout ---
     $mainLayout = New-Object Windows.Forms.TableLayoutPanel
     $mainLayout.Dock = 'Fill'
-    $mainLayout.AutoSize = $false
+    $mainLayout.AutoSize = $true
     $mainLayout.ColumnCount = 2
-    $mainLayout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'Percent', 50)) | Out-Null
-    $mainLayout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'Percent', 50)) | Out-Null
+    $mainLayout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize')) | Out-Null
+    $mainLayout.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize')) | Out-Null
     $form.Controls.Add($mainLayout)
 
     # --- Profile Controls (Row 0) ---
-    $gbProfile = New-Object Windows.Forms.GroupBox; $gbProfile.Text = "Profile"; $gbProfile.Dock = 'Fill'
+    $gbProfile = New-Object Windows.Forms.GroupBox; $gbProfile.Text = "Profile"; $gbProfile.Dock = 'Fill'; $gbProfile.AutoSize = $true
     $mainLayout.Controls.Add($gbProfile, 0, 0); $mainLayout.SetColumnSpan($gbProfile, 2)
 
-    $profileTlp = New-Object Windows.Forms.TableLayoutPanel; $profileTlp.Dock = 'Fill'; $profileTlp.AutoSize = $true; $profileTlp.Padding = 5
-    $profileTlp.ColumnCount = 4 # only add controls to 4 columns (0, 1, 2, 3)
-    $profileTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize')) | Out-Null # Select Profile:
-    $profileTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'Percent', 100)) | Out-Null # ComboBox (Dropdown)
-    $gbProfile.Controls.Add($profileTlp)
+    $profileTlp = New-Object Windows.Forms.TableLayoutPanel; $profileTlp.Dock = 'Fill'; $profileTlp.AutoSize = $true; $profileTlp.Padding = 5; $profileTlp.ColumnCount = 4
+    $profileTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize')) | Out-Null # Select Profile:
+    $profileTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'Percent', 100)) | Out-Null # ComboBox (Dropdown)
+    $profileTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize')) | Out-Null # Save Button
+    $profileTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize')) | Out-Null # Delete Button
+    $gbProfile.Controls.Add($profileTlp)
 
-    $profileTlp.Controls.Add((New-Label "Select Profile:"), 0, 0)
-    $cbProfiles = New-Object Windows.Forms.ComboBox; $cbProfiles.Dock = 'Fill'; $cbProfiles.Items.AddRange((Get-ProfileList)); $cbProfiles.DropDownStyle = 'DropDown'
-    $profileTlp.Controls.Add($cbProfiles, 1, 0)
-    $btnSaveProfile = New-Object Windows.Forms.Button; $btnSaveProfile.Text = "Save" # REMOVE Anchor = 'None'
-    $profileTlp.Controls.Add($btnSaveProfile, 2, 0)
-    $btnDeleteProfile = New-Object Windows.Forms.Button; $btnDeleteProfile.Text = "Delete" # REMOVE Anchor = 'None'
-    $profileTlp.Controls.Add($btnDeleteProfile, 3, 0)
+    $profileTlp.Controls.Add((New-Label "Select Profile:"), 0, 0)
+    $cbProfiles = New-Object Windows.Forms.ComboBox; $cbProfiles.Dock = 'Fill'; $cbProfiles.Items.AddRange((Get-ProfileList)); $cbProfiles.DropDownStyle = 'DropDown'
+    $profileTlp.Controls.Add($cbProfiles, 1, 0)
+    $btnSaveProfile = New-Object Windows.Forms.Button; $btnSaveProfile.Text = "Save"; $btnSaveProfile.Anchor = 'Top'
+    $profileTlp.Controls.Add($btnSaveProfile, 2, 0)
+    $btnDeleteProfile = New-Object Windows.Forms.Button; $btnDeleteProfile.Text = "Delete"; $btnDeleteProfile.Anchor = 'Top'
+    $profileTlp.Controls.Add($btnDeleteProfile, 3, 0)
 
 
     # --- Left Pane Layout ---
@@ -790,6 +790,7 @@ function Show-ConnectionConfigMenu {
         $tlp.Dock = 'Fill'; $tlp.AutoSize = $true; $tlp.Padding = 5; $tlp.ColumnCount = 3
         $tlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize')) | Out-Null
         $tlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'Percent', 100)) | Out-Null
+        $tlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize')) | Out-Null
         return $tlp
     }
 
@@ -805,12 +806,9 @@ function Show-ConnectionConfigMenu {
     $pnlSerial.Controls.Add((New-Label "Enable DTR:"), 0, 6);
 
     $cbPort = New-Object Windows.Forms.ComboBox; $cbPort.DropDownStyle = 'DropDownList'; $cbPort.Dock = 'Fill'
+    $pnlSerial.Controls.Add($cbPort, 1, 0)
     $btnRefreshPorts = New-Object Windows.Forms.Button; $btnRefreshPorts.Text = "Refresh"; $btnRefreshPorts.AutoSize = $true
-    $portTlp = New-Object Windows.Forms.TableLayoutPanel; $portTlp.Dock = 'Fill'; $portTlp.ColumnCount=1
-    $portTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'Percent', 100)) | Out-Null
-    $portTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize')) | Out-Null
-    $portTlp.Controls.AddRange(@($cbPort, $btnRefreshPorts))
-    $pnlSerial.Controls.Add($portTlp, 1, 0)
+    $pnlSerial.Controls.Add($btnRefreshPorts, 2, 0)
 
     $cbBaud = New-Object Windows.Forms.ComboBox; $cbBaud.DropDownStyle = 'DropDownList'; $cbBaud.Dock = 'Fill'; $cbBaud.Items.AddRange(@("9600", "19200", "38400", "57600", "115200"))
     $pnlSerial.Controls.Add($cbBaud, 1, 1)
@@ -846,7 +844,7 @@ function Show-ConnectionConfigMenu {
 
 
     # --- Right Pane (Common and Logging) ---
-    $gbCommon = New-Object Windows.Forms.GroupBox; $gbCommon.Text = "Terminal and Logging"; $gbCommon.Dock = 'Fill'
+    $gbCommon = New-Object Windows.Forms.GroupBox; $gbCommon.Text = "Terminal and Logging"; $gbCommon.Dock = 'Fill'; $gbCommon.AutoSize = $true
     $mainLayout.Controls.Add($gbCommon, 1, 1); $mainLayout.SetRowSpan($gbCommon, 2)
     $commonTlp = New-SettingsPanel
     $gbCommon.Controls.Add($commonTlp)
@@ -861,23 +859,35 @@ function Show-ConnectionConfigMenu {
     $commonTlp.Controls.Add((New-Label "Enable Logging:"), 0, 5); $chkBackgroundLogging = New-Object Windows.Forms.CheckBox; $chkBackgroundLogging.Anchor = 'Left'; $commonTlp.Controls.Add($chkBackgroundLogging, 1, 5)
     $commonTlp.Controls.Add((New-Label "Log File Path:"), 0, 6)
     $txtLogFilePath = New-Object Windows.Forms.TextBox; $txtLogFilePath.Dock = 'Fill'
+    $commonTlp.Controls.Add($txtLogFilePath, 1, 6)
     $btnBrowseLog = New-Object Windows.Forms.Button; $btnBrowseLog.Text = "..."; $btnBrowseLog.AutoSize = $true
-    $logFileTlp = New-Object Windows.Forms.TableLayoutPanel; $logFileTlp.Dock = 'Fill'; $logFileTlp.ColumnCount=2
-    $logFileTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'Percent', 100)) | Out-Null
-    $logFileTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize')) | Out-Null
-    $logFileTlp.Controls.AddRange(@($txtLogFilePath, $btnBrowseLog))
-    $commonTlp.Controls.Add($logFileTlp, 1, 6)
+    $commonTlp.Controls.Add($btnBrowseLog, 2, 6)
 
-    $commonTlp.Controls.Add((New-Label "Log Raw Stream Data:"), 0, 7); $chkRawLogData = New-Object Windows.Forms.CheckBox; $chkRawLogData.Anchor = 'Left'; $commonTlp.Controls.Add($chkRawLogData, 1, 7)
-    $commonTlp.Controls.Add((New-Label "Obfuscate Passwords:"), 0, 8); $chkObfuscate = New-Object Windows.Forms.CheckBox; $chkObfuscate.Anchor = 'Left'; $commonTlp.Controls.Add($chkObfuscate, 1, 8)
+    $commonTlp.Controls.Add((New-Label "Log Raw Stream Data:"), 0, 7); $chkRawLogData = New-Object Windows.Forms.CheckBox; $chkRawLogData.Anchor = 'Top'; $commonTlp.Controls.Add($chkRawLogData, 1, 7)
+    $commonTlp.Controls.Add((New-Label "Obfuscate Passwords:"), 0, 8); $chkObfuscate = New-Object Windows.Forms.CheckBox; $chkObfuscate.Anchor = 'Top'; $commonTlp.Controls.Add($chkObfuscate, 1, 8)
 
     # --- Bottom Buttons (Row 2) ---
     $buttonsFlow = New-Object Windows.Forms.FlowLayoutPanel
     $buttonsFlow.Dock = 'Fill'
-    $buttonsFlow.FlowDirection = 'RightToLeft'
-    $mainLayout.Controls.Add($buttonsFlow, 0, 2); $mainLayout.SetColumnSpan($buttonsFlow, 2)
-    $btnConnect = New-Object Windows.Forms.Button; $btnConnect.Text = "Connect"; $btnConnect.DialogResult = [Windows.Forms.DialogResult]::OK; $btnConnect.Width = 100; $btnConnect.Height = 30
-    $btnCancel = New-Object Windows.Forms.Button; $btnCancel.Text = "Cancel"; $btnCancel.DialogResult = [Windows.Forms.DialogResult]::Cancel; $btnCancel.Width = 100; $btnCancel.Height = 30
+    $buttonsFlow.AutoSize = $true
+    $buttonsFlow.FlowDirection = 'LeftToRight'
+    $buttonsFlow.WrapContents = $false
+    $buttonsFlow.Anchor = 'None'
+
+    # Add it centered within the cell
+    $mainLayout.Controls.Add($buttonsFlow, 0, 2); $mainLayout.SetColumnSpan($buttonsFlow, 2); $mainLayout.SetCellPosition($buttonsFlow, [System.Windows.Forms.TableLayoutPanelCellPosition]::new(0, 2)); $mainLayout.SetColumnSpan($buttonsFlow, 2)
+    $buttonsFlow.Anchor = 'None'
+
+    # Create buttons
+    $btnConnect = New-Object Windows.Forms.Button
+    $btnConnect.Text = "Connect"
+    $btnConnect.DialogResult = [Windows.Forms.DialogResult]::OK
+    $btnConnect.Width = 100; $btnConnect.Height = 30
+
+    $btnCancel = New-Object Windows.Forms.Button
+    $btnCancel.Text = "Cancel"
+    $btnCancel.DialogResult = [Windows.Forms.DialogResult]::Cancel
+    $btnCancel.Width = 100; $btnCancel.Height = 30
     $buttonsFlow.Controls.AddRange(@($btnCancel, $btnConnect))
 
     # --- Event Handlers & Logic ---
@@ -900,9 +910,14 @@ function Show-ConnectionConfigMenu {
     $form.add_FormClosing({ $portRefreshTimer.Stop(); $portRefreshTimer.Dispose() })
 
     $UpdateFormForType = {
-        $pnlSerial.Visible = $rbSerial.Checked; $pnlSsh.Visible = $rbSsh.Checked; $pnlTelnet.Visible = $rbTelnet.Checked
+        $pnlSerial.Visible = $rbSerial.Checked
+        $pnlSsh.Visible = $rbSsh.Checked
+        $pnlTelnet.Visible = $rbTelnet.Checked
+        $form.PerformLayout()
     }
-    $rbSerial.add_CheckedChanged($UpdateFormForType); $rbSsh.add_CheckedChanged($UpdateFormForType); $rbTelnet.add_CheckedChanged($UpdateFormForType)
+    $rbSerial.add_CheckedChanged($UpdateFormForType)
+    $rbSsh.add_CheckedChanged($UpdateFormForType)
+    $rbTelnet.add_CheckedChanged($UpdateFormForType)
 
     $LoadProfileIntoForm = {
         param($profile)
