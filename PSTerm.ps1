@@ -195,7 +195,7 @@ function Save-Profile($name, $config) {
     # $profiles = $profiles | Where-Object { $_.Name -and $_.Name.Trim().ToLower() -ne $name.ToLower() }
 
 	$profiles = $profiles | Where-Object { $_.Name -ne $name }
-	
+
     $config.Name = $name
     $profiles += $config
 
@@ -363,9 +363,9 @@ function Start-SerialSession {
             $Host.UI.RawUI.BackgroundColor = $Config.BackgroundColor
             Clear-Host
         }
-        
+
 		$host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
-		
+
         if ($Config.BackgroundLogging) {
             $logger = Start-SessionLogger -LogFilePath $Config.LogFilePath -RawSessionData:$Config.RawLogData -ObfuscatePasswords:$Config.ObfuscatePasswords
         }
@@ -490,7 +490,7 @@ function Start-SshSession {
         $shellStream = $client.CreateShellStream("xterm-256color", $termWidth, $termHeight, 0, 0, 4096)
 
         [Console]::TreatControlCAsInput = $true
-        
+
         Write-Host "--- SSH Session Started. Press ESC in the console to exit. ---`n" -ForegroundColor Green
 
         $inputHelpers = [Collections.Generic.Dictionary[ConsoleKey, String]]::new()
@@ -603,9 +603,9 @@ function Start-TelnetSession {
             $Host.UI.RawUI.BackgroundColor = $Config.BackgroundColor
             Clear-Host
         }
-		
+
 		$host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
-        
+
         if ($Config.BackgroundLogging) {
             $logger = Start-SessionLogger -LogFilePath $Config.LogFilePath -RawSessionData:$Config.RawLogData -ObfuscatePasswords:$Config.ObfuscatePasswords
         }
@@ -750,7 +750,7 @@ function Show-ConnectionConfigMenu {
     # --- Profile Controls (Row 0) ---
     $gbProfile = New-Object Windows.Forms.GroupBox; $gbProfile.Text = "Profile"; $gbProfile.Dock = 'Fill'
     $mainLayout.Controls.Add($gbProfile, 0, 0); $mainLayout.SetColumnSpan($gbProfile, 2)
-    
+
     $profileTlp = New-Object Windows.Forms.TableLayoutPanel; $profileTlp.Dock = 'Fill'; $profileTlp.AutoSize = $true; $profileTlp.Padding = 5
     $profileTlp.ColumnCount = 4 # only add controls to 4 columns (0, 1, 2, 3)
     $profileTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize')) | Out-Null # Select Profile:
@@ -796,7 +796,7 @@ function Show-ConnectionConfigMenu {
     # Serial Panel
     $pnlSerial = New-SettingsPanel
     $gbConnSpecific.Controls.Add($pnlSerial)
-    $pnlSerial.Controls.Add((New-Label "COM Port:"), 0, 0); 
+    $pnlSerial.Controls.Add((New-Label "COM Port:"), 0, 0);
     $pnlSerial.Controls.Add((New-Label "Baud Rate:"), 0, 1);
     $pnlSerial.Controls.Add((New-Label "Data Bits:"), 0, 2);
     $pnlSerial.Controls.Add((New-Label "Parity:"), 0, 3);
@@ -811,7 +811,7 @@ function Show-ConnectionConfigMenu {
     $portTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize')) | Out-Null
     $portTlp.Controls.AddRange(@($cbPort, $btnRefreshPorts))
     $pnlSerial.Controls.Add($portTlp, 1, 0)
-    
+
     $cbBaud = New-Object Windows.Forms.ComboBox; $cbBaud.DropDownStyle = 'DropDownList'; $cbBaud.Dock = 'Fill'; $cbBaud.Items.AddRange(@("9600", "19200", "38400", "57600", "115200"))
     $pnlSerial.Controls.Add($cbBaud, 1, 1)
     $cbDataBits = New-Object Windows.Forms.ComboBox; $cbDataBits.DropDownStyle = 'DropDownList'; $cbDataBits.Dock = 'Fill'; $cbDataBits.Items.AddRange(@("8", "7"))
@@ -824,7 +824,7 @@ function Show-ConnectionConfigMenu {
     $pnlSerial.Controls.Add($cbHandshake, 1, 5)
     $chkDtrEnable = New-Object Windows.Forms.CheckBox; $chkDtrEnable.Anchor = 'Left'
     $pnlSerial.Controls.Add($chkDtrEnable, 1, 6)
-    
+
     # SSH Panel
     $pnlSsh = New-SettingsPanel; $pnlSsh.Visible = $false
     $gbConnSpecific.Controls.Add($pnlSsh)
@@ -850,14 +850,14 @@ function Show-ConnectionConfigMenu {
     $mainLayout.Controls.Add($gbCommon, 1, 1); $mainLayout.SetRowSpan($gbCommon, 2)
     $commonTlp = New-SettingsPanel
     $gbCommon.Controls.Add($commonTlp)
-    
+
     $allColors = [System.Enum]::GetNames([System.ConsoleColor])
     $commonTlp.Controls.Add((New-Label "Text Color:"), 0, 0); $cbTextColor = New-Object Windows.Forms.ComboBox; $cbTextColor.DropDownStyle = 'DropDownList'; $cbTextColor.Dock = 'Fill'; $cbTextColor.Items.AddRange($allColors); $commonTlp.Controls.Add($cbTextColor, 1, 0)
     $commonTlp.Controls.Add((New-Label "Background Color:"), 0, 1); $cbBgColor = New-Object Windows.Forms.ComboBox; $cbBgColor.DropDownStyle = 'DropDownList'; $cbBgColor.Dock = 'Fill'; $cbBgColor.Items.AddRange($allColors); $commonTlp.Controls.Add($cbBgColor, 1, 1)
     $commonTlp.Controls.Add((New-Label "Cursor Size:"), 0, 2); $cbCursorSize = New-Object Windows.Forms.ComboBox; $cbCursorSize.DropDownStyle = 'DropDownList'; $cbCursorSize.Dock = 'Fill'; $cbCursorSize.Items.AddRange(@("Normal", "Small", "Large")); $commonTlp.Controls.Add($cbCursorSize, 1, 2)
     $commonTlp.Controls.Add((New-Label "Force Terminal Colors:"), 0, 3); $chkForceColors = New-Object Windows.Forms.CheckBox; $chkForceColors.Anchor = 'Left'; $commonTlp.Controls.Add($chkForceColors, 1, 3)
     $commonTlp.Controls.Add((New-Label "Send Keep-Alive:"), 0, 4); $chkKeepAlive = New-Object Windows.Forms.CheckBox; $chkKeepAlive.Anchor = 'Left'; $commonTlp.Controls.Add($chkKeepAlive, 1, 4)
-    
+
     $commonTlp.Controls.Add((New-Label "Enable Logging:"), 0, 5); $chkBackgroundLogging = New-Object Windows.Forms.CheckBox; $chkBackgroundLogging.Anchor = 'Left'; $commonTlp.Controls.Add($chkBackgroundLogging, 1, 5)
     $commonTlp.Controls.Add((New-Label "Log File Path:"), 0, 6)
     $txtLogFilePath = New-Object Windows.Forms.TextBox; $txtLogFilePath.Dock = 'Fill'
@@ -867,7 +867,7 @@ function Show-ConnectionConfigMenu {
     $logFileTlp.ColumnStyles.Add((New-Object Windows.Forms.ColumnStyle 'AutoSize')) | Out-Null
     $logFileTlp.Controls.AddRange(@($txtLogFilePath, $btnBrowseLog))
     $commonTlp.Controls.Add($logFileTlp, 1, 6)
-    
+
     $commonTlp.Controls.Add((New-Label "Log Raw Stream Data:"), 0, 7); $chkRawLogData = New-Object Windows.Forms.CheckBox; $chkRawLogData.Anchor = 'Left'; $commonTlp.Controls.Add($chkRawLogData, 1, 7)
     $commonTlp.Controls.Add((New-Label "Obfuscate Passwords:"), 0, 8); $chkObfuscate = New-Object Windows.Forms.CheckBox; $chkObfuscate.Anchor = 'Left'; $commonTlp.Controls.Add($chkObfuscate, 1, 8)
 
@@ -959,7 +959,7 @@ function Show-ConnectionConfigMenu {
 
     # Initial load
     $LoadProfileIntoForm.Invoke((Import-Profile "Default-Serial")); $cbProfiles.Text = "Default-Serial"
-    
+
     $form.Add_Shown({ $form.Activate() })
     $result = $form.ShowDialog()
 
