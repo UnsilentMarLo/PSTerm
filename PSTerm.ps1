@@ -70,7 +70,7 @@ if (-not (Test-Path $ProfilesFile)) {
             Parity              = "None"
             StopBits            = "One"
             Handshake           = "None"
-            RTSEnable           = $false
+            DtrEnable           = $false
             Host                = ""
             User                = ""
             SshPort             = 22
@@ -96,7 +96,7 @@ if (-not (Test-Path $ProfilesFile)) {
             Parity              = "None"
             StopBits            = "One"
             Handshake           = "None"
-            RTSEnable           = $false
+            DtrEnable           = $false
             Host                = ""
             User                = ""
             SshPort             = 22
@@ -122,7 +122,7 @@ if (-not (Test-Path $ProfilesFile)) {
             Parity              = "None"
             StopBits            = "One"
             Handshake           = "None"
-            RTSEnable           = $false
+            DtrEnable           = $false
             Host                = ""
             User                = ""
             SshPort             = 22
@@ -742,12 +742,12 @@ function Show-ConnectionConfigMenu {
     # --- Main Layout Panels ---
     $gbProfile = New-Object Windows.Forms.GroupBox; $gbProfile.Text = "Profile"; $gbProfile.Location = New-Object Drawing.Point(10, 10); $gbProfile.Size = New-Object Drawing.Size(805, 60); $form.Controls.Add($gbProfile)
     $gbType = New-Object Windows.Forms.GroupBox; $gbType.Text = "Connection Type"; $gbType.Location = New-Object Drawing.Point(10, 80); $gbType.Size = New-Object Drawing.Size(390, 60); $form.Controls.Add($gbType)
-    $gbConnSpecific = New-Object Windows.Forms.GroupBox; $gbConnSpecific.Text = "Connection Settings"; $gbConnSpecific.Location = New-Object Drawing.Point(10, 150); $gbConnSpecific.Size = New-Object Drawing.Size(390, 220); $form.Controls.Add($gbConnSpecific)
+    $gbConnSpecific = New-Object Windows.Forms.GroupBox; $gbConnSpecific.Text = "Connection Settings"; $gbConnSpecific.Location = New-Object Drawing.Point(10, 150); $gbConnSpecific.Size = New-Object Drawing.Size(390, 225); $form.Controls.Add($gbConnSpecific)
     
-    $gbAutoInput = New-Object Windows.Forms.GroupBox; $gbAutoInput.Text = "Auto-Input Script"; $gbAutoInput.Location = New-Object Drawing.Point(10, 380); $gbAutoInput.Size = New-Object Drawing.Size(390, 130); $form.Controls.Add($gbAutoInput)
+    $gbAutoInput = New-Object Windows.Forms.GroupBox; $gbAutoInput.Text = "Auto-Input Script"; $gbAutoInput.Location = New-Object Drawing.Point(10, 385); $gbAutoInput.Size = New-Object Drawing.Size(390, 135); $form.Controls.Add($gbAutoInput)
     $txtAutoInput = New-Object Windows.Forms.TextBox; $txtAutoInput.Multiline = $true; $txtAutoInput.ScrollBars = 'Vertical'; $txtAutoInput.AcceptsReturn = $true; $txtAutoInput.Location = New-Object Drawing.Point(15, 25); $txtAutoInput.Size = New-Object Drawing.Size(360, 90); $gbAutoInput.Controls.Add($txtAutoInput)
 
-    $gbCommon = New-Object Windows.Forms.GroupBox; $gbCommon.Text = "Terminal & Logging Settings"; $gbCommon.Location = New-Object Drawing.Point(425, 80); $gbCommon.Size = New-Object Drawing.Size(390, 430); $form.Controls.Add($gbCommon)
+    $gbCommon = New-Object Windows.Forms.GroupBox; $gbCommon.Text = "Terminal and Logging Settings"; $gbCommon.Location = New-Object Drawing.Point(415, 80); $gbCommon.Size = New-Object Drawing.Size(400, 440); $form.Controls.Add($gbCommon)
 
     # --- Profile Controls ---
     $cbProfiles = $null; Add-ControlPair $gbProfile "Select Profile" 25 ([ref]$cbProfiles) (Get-ProfileList) "ComboBox" 100 200
@@ -766,20 +766,21 @@ function Show-ConnectionConfigMenu {
     $pnlTelnet = New-Object Windows.Forms.Panel; $pnlTelnet.Dock = 'Fill'; $pnlTelnet.Visible = $false; $gbConnSpecific.Controls.Add($pnlTelnet)
 
     # Serial Controls
-    $serialY = 25; $cbPort = $null; Add-ControlPair $pnlSerial "COM Port" $serialY ([ref]$cbPort) ([System.IO.Ports.SerialPort]::GetPortNames()) "ComboBox" 120 250
+    $serialY = 5; $cbPort = $null; Add-ControlPair $pnlSerial "COM Port" $serialY ([ref]$cbPort) ([System.IO.Ports.SerialPort]::GetPortNames()) "ComboBox" 120 250
     $serialY += 30; $cbBaud = $null; Add-ControlPair $pnlSerial "Baud Rate" $serialY ([ref]$cbBaud) @("9600", "19200", "38400", "57600", "115200") "ComboBox" 120 250
     $serialY += 30; $cbDataBits = $null; Add-ControlPair $pnlSerial "Data Bits" $serialY ([ref]$cbDataBits) @("8", "7") "ComboBox" 120 250
     $serialY += 30; $cbParity = $null; Add-ControlPair $pnlSerial "Parity" $serialY ([ref]$cbParity) ([enum]::GetNames([System.IO.Ports.Parity])) "ComboBox" 120 250
     $serialY += 30; $cbStopBits = $null; Add-ControlPair $pnlSerial "Stop Bits" $serialY ([ref]$cbStopBits) ([enum]::GetNames([System.IO.Ports.StopBits])) "ComboBox" 120 250
     $serialY += 30; $cbHandshake = $null; Add-ControlPair $pnlSerial "Handshake" $serialY ([ref]$cbHandshake) ([enum]::GetNames([System.IO.Ports.Handshake])) "ComboBox" 120 250
+    $serialY += 30; $chkDtrEnable = $null; Add-ControlPair $pnlSerial "Enable DTR Ready State" $serialY ([ref]$chkDtrEnable) $null "CheckBox" 160 20
 
     # SSH Controls
-    $sshY = 25; $txtSshHost = $null; Add-ControlPair $pnlSsh "Host / IP" $sshY ([ref]$txtSshHost) $null "TextBox" 120 250
+    $sshY = 5; $txtSshHost = $null; Add-ControlPair $pnlSsh "Host / IP" $sshY ([ref]$txtSshHost) $null "TextBox" 120 250
     $sshY += 30; $txtSshUser = $null; Add-ControlPair $pnlSsh "Username" $sshY ([ref]$txtSshUser) $null "TextBox" 120 250
     $sshY += 30; $txtSshPort = $null; Add-ControlPair $pnlSsh "Port" $sshY ([ref]$txtSshPort) $null "TextBox" 120 250
 
     # Telnet Controls
-    $telnetY = 25; $txtTelnetHost = $null; Add-ControlPair $pnlTelnet "Host / IP" $telnetY ([ref]$txtTelnetHost) $null "TextBox" 120 250
+    $telnetY = 5; $txtTelnetHost = $null; Add-ControlPair $pnlTelnet "Host / IP" $telnetY ([ref]$txtTelnetHost) $null "TextBox" 120 250
     $telnetY += 30; $txtTelnetPort = $null; Add-ControlPair $pnlTelnet "Port" $telnetY ([ref]$txtTelnetPort) $null "TextBox" 120 250
 
     # --- Common Settings Controls ---
@@ -790,7 +791,7 @@ function Show-ConnectionConfigMenu {
     $commonY += 35; $chkForceColors = $null; Add-ControlPair $gbCommon "Force Terminal Colors" $commonY ([ref]$chkForceColors) $null "CheckBox" 160 20
     $commonY += 30; $chkKeepAlive = $null; Add-ControlPair $gbCommon "Send Keep-Alive" $commonY ([ref]$chkKeepAlive) $null "CheckBox" 160 20
     
-    $commonY += 40 # Spacer for logging section
+    $commonY += 170 # Spacer for logging section
     
     # Logging Controls
     $chkBackgroundLogging = $null; Add-ControlPair $gbCommon "Enable Logging" $commonY ([ref]$chkBackgroundLogging) $null "CheckBox" 160 20
@@ -819,7 +820,7 @@ function Show-ConnectionConfigMenu {
             "SSH"    { $rbSsh.Checked = $true }
             "Telnet" { $rbTelnet.Checked = $true }
         }
-        $cbPort.Text = $profile.COMPort; $cbBaud.Text = $profile.BaudRate; $cbDataBits.Text = $profile.DataBits; $cbParity.Text = $profile.Parity; $cbStopBits.Text = $profile.StopBits; $cbHandshake.Text = $profile.Handshake
+        $cbPort.Text = $profile.COMPort; $cbBaud.Text = $profile.BaudRate; $cbDataBits.Text = $profile.DataBits; $cbParity.Text = $profile.Parity; $cbStopBits.Text = $profile.StopBits; $cbHandshake.Text = $profile.Handshake; $chkDtrEnable.Checked = $profile.DtrEnable
         $txtSshHost.Text = $profile.Host; $txtSshUser.Text = $profile.User; $txtSshPort.Text = $profile.SshPort
         $txtTelnetHost.Text = $profile.Host; $txtTelnetPort.Text = $profile.TelnetPort
         $cbTextColor.Text = $profile.TextColor; $cbBgColor.Text = $profile.BackgroundColor; $cbCursorSize.Text = $profile.CursorSize
@@ -842,6 +843,7 @@ function Show-ConnectionConfigMenu {
             Parity              = $cbParity.Text
             StopBits            = $cbStopBits.Text
             Handshake           = $cbHandshake.Text
+            DtrEnable           = $chkDtrEnable.Checked
             Host                = if ($rbSsh.Checked) { $txtSshHost.Text } elseif ($rbTelnet.Checked) { $txtTelnetHost.Text } else { $txtSshHost.Text }
             User                = $txtSshUser.Text
             SshPort             = $txtSshPort.Text
@@ -921,7 +923,7 @@ function Show-ConnectionConfigMenu {
             Parity              = $cbParity.Text
             StopBits            = $cbStopBits.Text
             Handshake           = $cbHandshake.Text
-            RTSEnable           = $false # This was not in the GUI, setting a default
+            DtrEnable           = $chkDtrEnable.Checked
             Host                = if ($rbSsh.Checked) { $txtSshHost.Text } elseif ($rbTelnet.Checked) { $txtTelnetHost.Text } else { "" }
             User                = $txtSshUser.Text
             SshPort             = [int]$txtSshPort.Text
@@ -975,6 +977,7 @@ while ($true) {
                 if ([string]::IsNullOrWhiteSpace($config.COMPort)) { throw "No COM Port selected." }
                 $port = New-Object System.IO.Ports.SerialPort($config.COMPort, $config.BaudRate, $config.Parity, $config.DataBits, $config.StopBits)
                 $port.Handshake = $config.Handshake
+                $port.DtrEnable = $config.DtrEnable
                 $port.Open()
                 Start-SerialSession -Port $port -Config $config
                 $port.Close()
