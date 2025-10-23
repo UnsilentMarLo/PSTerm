@@ -4,6 +4,7 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 Add-Type -AssemblyName Microsoft.VisualBasic
 Add-Type -AssemblyName System
+[System.Windows.Forms.Application]::EnableVisualStyles()
 if ($Host.Name -eq 'ConsoleHost') {
     [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 }
@@ -209,12 +210,17 @@ function Save-Profile($name, $config) {
 # Function to remove ANSI escape sequences from a string
 function Remove-AnsiEscapeSequences {
     param([string]$textinput)
-    if (-not $textinput) { return $textinput }
+    if (-not $textinput) { return '' }
 
-    $esc = [char]27
-    # CSI, OSC, and other common escape patterns
-    $pattern = "$esc\[[0-9;?]*[@-~]|$esc\][^\a\e]*([\a]|\e\\)|$esc."
-    return $textinput -replace $pattern, ''
+    # Pattern to match ANSI escape codes
+    $ansiPattern = '\x1B\[[0-9;?]*[@-~]'
+    $cleanedText = $textinput -replace $ansiPattern, ''
+
+    # Pattern to match other non-printable control characters, preserving CR, LF, and Tab
+    $controlCharPattern = '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'
+    $cleanedText = $cleanedText -replace $controlCharPattern, ''
+
+    return $cleanedText
 }
 
 function Start-SessionLogger {
@@ -489,6 +495,39 @@ function Start-SshSession {
         $termHeight = if ($Host.UI.RawUI.WindowSize.Height -gt 0) { $Host.UI.RawUI.WindowSize.Height } else { 24 }
         $shellStream = $client.CreateShellStream("xterm-256color", $termWidth, $termHeight, 0, 0, 4096)
 
+        # --- Echo Detection ---
+        $logUserInput = $true # Default to true (no echo)
+        if ($logger) {
+            Write-Host "Performing echo detection..." -ForegroundColor DarkGray
+            try {
+                $testString = [guid]::NewGuid().ToString()
+                $testBytes = [System.Text.Encoding]::UTF8.GetBytes($testString)
+                $shellStream.Write($testBytes, 0, $testBytes.Length); $shellStream.Flush()
+                Start-Sleep -Milliseconds 250
+
+                if ($shellStream.DataAvailable) {
+                    $buffer = New-Object byte[] 4096
+                    $read = $shellStream.Read($buffer, 0, $buffer.Length)
+                    if ($read -gt 0) {
+                        $response = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $read)
+                        if ($response.Contains($testString)) {
+                            Write-Host "Echo detected. Disabling client-side input logging." -ForegroundColor DarkGray
+                            $logUserInput = $false
+                            $backspaceChars = ("`b" * $testString.Length) + (" " * $testString.Length) + ("`b" * $testString.Length)
+                            $backspaceBytes = [System.Text.Encoding]::UTF8.GetBytes($backspaceChars)
+                            $shellStream.Write($backspaceBytes, 0, $backspaceBytes.Length); $shellStream.Flush()
+                            Start-Sleep -Milliseconds 100
+                        }
+                    }
+                }
+                while ($shellStream.DataAvailable) { $shellStream.Read((New-Object byte[] 4096), 0, 4096) > $null }
+            } catch {
+                Write-Warning "Could not perform SSH echo test. Assuming echo is enabled to prevent double logs."
+                $logUserInput = $false
+            }
+        }
+        # --- End Echo Detection ---
+
         [Console]::TreatControlCAsInput = $true
 
         Write-Host "--- SSH Session Started. Press ESC in the console to exit. ---`n" -ForegroundColor Green
@@ -524,7 +563,7 @@ function Start-SshSession {
                 $bytes = [System.Text.Encoding]::UTF8.GetBytes($command)
                 $shellStream.Write($bytes, 0, $bytes.Length)
                 $shellStream.Flush()
-                if ($logger) { $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = $command }) }
+                if ($logger -and $logUserInput) { $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = $command }) }
                 Start-Sleep -Milliseconds 200
             }
         }
@@ -553,8 +592,10 @@ function Start-SshSession {
                     $shellStream.Write($bytes, 0, $bytes.Length)
                     $shellStream.Flush()
 
-                    # BUGFIX: Do NOT log user's keypress here. The server echo will be logged instead,
-                    # preventing double characters in the log file.
+                    if ($logger -and $logUserInput) {
+                        $dataToLog = if ($Config.RawLogData) { $output } else { Remove-AnsiEscapeSequences $output }
+                        $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = $dataToLog })
+                    }
                 }
                 Start-Sleep -Milliseconds 20
             }
