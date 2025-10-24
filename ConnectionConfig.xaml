@@ -1,3 +1,20 @@
+<!--
+    PSTerm - A powerful native PowerShell Serial/SSH/Telnet Terminal.
+    Copyright (C) 2025 Marlo K <Plays.xenon@yahoo.de>
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+-->
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Connection Configuration" 
@@ -141,9 +158,18 @@
         </GroupBox>
 
         <!-- Bottom Buttons -->
-        <StackPanel Orientation="Horizontal" Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="2" HorizontalAlignment="Right" Margin="5">
-            <Button x:Name="btnConnect" Content="Connect" IsDefault="True" MinWidth="80" Margin="5" Padding="10,2"/>
-            <Button x:Name="btnCancel" Content="Cancel" IsCancel="True" MinWidth="80" Margin="5" Padding="10,2"/>
-        </StackPanel>
+        <Grid Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto"/>
+                <ColumnDefinition Width="*"/>
+            </Grid.ColumnDefinitions>
+
+            <Button x:Name="btnAbout" Content="About" HorizontalAlignment="Left" MinWidth="80" Margin="10,5,5,5" Padding="10,2"/>
+
+            <StackPanel Orientation="Horizontal" Grid.Column="1" HorizontalAlignment="Right" Margin="5">
+                <Button x:Name="btnConnect" Content="Connect" IsDefault="True" MinWidth="80" Margin="5" Padding="10,2"/>
+                <Button x:Name="btnCancel" Content="Cancel" IsCancel="True" MinWidth="80" Margin="5" Padding="10,2"/>
+            </StackPanel>
+        </Grid>
     </Grid>
 </Window>

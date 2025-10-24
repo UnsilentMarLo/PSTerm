@@ -1,3 +1,20 @@
+<#
+    PSTerm - A powerful native PowerShell Serial/SSH/Telnet Terminal.
+    Copyright (C) 2025 Marlo K <Plays.xenon@yahoo.de>
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#>
 #region GUI Function
 
 function Show-ConnectionConfigMenu {
@@ -14,6 +31,7 @@ function Show-ConnectionConfigMenu {
     $form.AutoSizeMode = 'GrowAndShrink'
     $form.StartPosition = "CenterScreen"
     #$form.Padding = 10
+    $form.Icon = New-Object System.Drawing.Icon(Join-Path $ScriptBaseDir "src\icon.ico")
 
     # Helper function to create a label
     function New-Label($text) {
@@ -178,6 +196,11 @@ function Show-ConnectionConfigMenu {
     $btnCancel.Width = 100; $btnCancel.Height = 30
     $buttonsFlow.Controls.AddRange(@($btnCancel, $btnConnect))
 
+    $btnAbout = New-Object Windows.Forms.Button
+    $btnAbout.Text = "About"
+    $btnAbout.Width = 100; $btnAbout.Height = 30
+    $buttonsFlow.Controls.Add($btnAbout)
+
     # --- Event Handlers & Logic ---
     $currentPorts = @()
     $RefreshPortsAction = {
@@ -260,6 +283,43 @@ function Show-ConnectionConfigMenu {
         if ($sfd.ShowDialog() -eq "OK") { $txtLogFilePath.Text = $sfd.FileName }
     })
 
+    $btnAbout.add_Click({
+        $aboutForm = New-Object Windows.Forms.Form
+        $aboutForm.Text = "About PSTerm"
+        $aboutForm.FormBorderStyle = 'FixedDialog'
+        $aboutForm.MaximizeBox = $false
+        $aboutForm.MinimizeBox = $false
+        $aboutForm.StartPosition = "CenterParent"
+        $aboutForm.ClientSize = New-Object System.Drawing.Size(300, 200)
+
+        $layout = New-Object Windows.Forms.TableLayoutPanel
+        $layout.Dock = 'Fill'
+        $aboutForm.Controls.Add($layout)
+
+        $copyright = New-Object Windows.Forms.Label
+        $copyright.Text = "PSTerm - A powerful native PowerShell Serial/SSH/Telnet Terminal.`nCopyright (C) 2025 Marlo K <Plays.xenon@yahoo.de>"
+        $copyright.Dock = 'Fill'
+        $layout.Controls.Add($copyright, 0, 0)
+
+        $license = New-Object Windows.Forms.Label
+        $license.Text = "This program comes with ABSOLUTELY NO WARRANTY."
+        $license.Dock = 'Fill'
+        $layout.Controls.Add($license, 0, 1)
+
+        $license2 = New-Object Windows.Forms.Label
+        $license2.Text = "This is free software, and you are welcome to redistribute it`nunder certain conditions. See the LICENSE file for details."
+        $license2.Dock = 'Fill'
+        $layout.Controls.Add($license2, 0, 2)
+
+        $okButton = New-Object Windows.Forms.Button
+        $okButton.Text = "OK"
+        $okButton.DialogResult = [Windows.Forms.DialogResult]::OK
+        $okButton.Anchor = 'None'
+        $layout.Controls.Add($okButton, 0, 3)
+
+        $aboutForm.ShowDialog($form) | Out-Null
+    })
+
     # Initial load
     $LoadProfileIntoForm.Invoke((Import-Profile "Default-Serial")); $cbProfiles.Text = "Default-Serial"
 
@@ -305,6 +365,10 @@ function Show-ConnectionConfigMenu_WPF {
         $reader = New-Object System.Xml.XmlNodeReader($xaml)
         $window = [Windows.Markup.XamlReader]::Load($reader)
 
+        # Set icon
+        $window.TaskbarItemInfo = New-Object System.Windows.Shell.TaskbarItemInfo
+        $window.TaskbarItemInfo.Overlay = [System.Windows.Media.Imaging.BitmapFrame]::Create([System.Uri](Join-Path $ScriptBaseDir "src\icon.ico"))
+        $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create([System.Uri](Join-Path $ScriptBaseDir "src\icon.ico"))
         # Find controls
         $controls = @{}
         $window.FindName("cbProfiles") | ForEach-Object { $controls.cbProfiles = $_ }
@@ -342,6 +406,7 @@ function Show-ConnectionConfigMenu_WPF {
         $window.FindName("chkObfuscate") | ForEach-Object { $controls.chkObfuscate = $_ }
         $window.FindName("btnConnect") | ForEach-Object { $controls.btnConnect = $_ }
         $window.FindName("btnCancel") | ForEach-Object { $controls.btnCancel = $_ }
+        $window.FindName("btnAbout") | ForEach-Object { $controls.btnAbout = $_ }
 
         # --- Populate Controls ---
         $controls.cbProfiles.ItemsSource = Get-ProfileList
@@ -457,6 +522,42 @@ function Show-ConnectionConfigMenu_WPF {
 
         $controls.btnConnect.add_Click({ $window.DialogResult = $true; $window.Close() })
         $controls.btnCancel.add_Click({ $window.DialogResult = $false; $window.Close() })
+        $controls.btnAbout.add_Click({
+            $aboutWindow = New-Object Windows.Window
+            $aboutWindow.Title = "About PSTerm"
+            $aboutWindow.Width = 400
+            $aboutWindow.Height = 300
+            $aboutWindow.WindowStartupLocation = "CenterOwner"
+            $aboutWindow.Owner = $window
+
+            $stackPanel = New-Object Windows.Controls.StackPanel
+            $aboutWindow.Content = $stackPanel
+
+            $copyright = New-Object Windows.Controls.TextBlock
+            $copyright.Text = "PSTerm - A powerful native PowerShell Serial/SSH/Telnet Terminal.`nCopyright (C) 2025 Marlo K <Plays.xenon@yahoo.de>"
+            $copyright.Margin = "10"
+            $stackPanel.Children.Add($copyright)
+
+            $license = New-Object Windows.Controls.TextBlock
+            $license.Text = "This program comes with ABSOLUTELY NO WARRANTY."
+            $license.Margin = "10"
+            $stackPanel.Children.Add($license)
+
+            $license2 = New-Object Windows.Controls.TextBlock
+            $license2.Text = "This is free software, and you are welcome to redistribute it`nunder certain conditions. See the LICENSE file for details."
+            $license2.Margin = "10"
+            $stackPanel.Children.Add($license2)
+
+            $okButton = New-Object Windows.Controls.Button
+            $okButton.Content = "OK"
+            $okButton.Width = 80
+            $okButton.Margin = "10"
+            $okButton.HorizontalAlignment = "Center"
+            $okButton.add_Click({ $aboutWindow.Close() })
+            $stackPanel.Children.Add($okButton)
+
+            $aboutWindow.ShowDialog() | Out-Null
+        })
 
         # Initial load
         $LoadProfileIntoForm.Invoke((Import-Profile "Default-Serial")); $controls.cbProfiles.SelectedItem = "Default-Serial"

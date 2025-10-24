@@ -1,11 +1,20 @@
-<# ps2exe [-inputFile] '<file_name>' [[-outputFile] '<file_name>']
-       [-prepareDebug] [-x86|-x64] [-lcid <id>] [-STA|-MTA] [-noConsole] [-conHost] [-UNICODEEncoding]
-       [-credentialGUI] [-iconFile '<filename>'] [-title '<title>'] [-description '<description>']
-       [-company '<company>'] [-product '<product>'] [-copyright '<copyright>'] [-trademark '<trademark>']
-       [-version '<version>'] [-configFile] [-noOutput] [-noError] [-noVisualStyles] [-exitOnCancel]
-       [-DPIAware] [-requireAdmin] [-supportOS] [-virtualize] [-longPaths]
-	   #>
+<#
+    PSTerm - A powerful native PowerShell Serial/SSH/Telnet Terminal.
+    Copyright (C) 2025 Marlo K <Plays.xenon@yahoo.de>
 
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#>
 # Ensure the script stops on errors
 $ErrorActionPreference = "Stop"
 
