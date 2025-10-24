@@ -14,7 +14,7 @@ if (-not (Test-Path -Path $targetScriptPath)) {
     Write-Host -ForegroundColor Red "ERROR: The source file '$targetScriptPath' cant be found."
     exit 1
 }
-
+ 
 Write-Host "Source file found: $targetScriptPath"
 
 Write-Host "searching for a valid certificate..."
