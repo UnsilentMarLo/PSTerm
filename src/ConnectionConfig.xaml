@@ -74,8 +74,9 @@
                         <Grid.ColumnDefinitions>
                             <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
+
                         <Label Content="COM Port:" Grid.Row="0" Grid.Column="0" VerticalAlignment="Center"/>
-                        <ComboBox x:Name="cbPort" Grid.Row="0" Grid.Column="1" VerticalAlignment="Center" IsEditable="False"/>
+                        <ComboBox x:Name="cbPort" Grid.Row="0" Grid.Column="1" VerticalAlignment="Center" IsEditable="True" IsReadOnly="True"/>
                         <Button x:Name="btnRefreshPorts" Content="Refresh" Grid.Row="0" Grid.Column="2" Padding="5,2" Margin="0,5,5,5"/>
 
                         <Label Content="Baud Rate:" Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>

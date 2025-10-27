@@ -367,8 +367,8 @@ function Show-ConnectionConfigMenu_WPF {
 
         # Set icon
         $window.TaskbarItemInfo = New-Object System.Windows.Shell.TaskbarItemInfo
-        $window.TaskbarItemInfo.Overlay = [System.Windows.Media.Imaging.BitmapFrame]::Create([System.Uri](Join-Path $ScriptBaseDir "src\icon.ico"))
-        $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create([System.Uri](Join-Path $ScriptBaseDir "src\icon.ico"))
+        $window.TaskbarItemInfo.Overlay = [System.Windows.Media.Imaging.BitmapFrame]::Create([System.Uri](Join-Path $ScriptBaseDir "icon.ico"))
+        $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create([System.Uri](Join-Path $ScriptBaseDir "icon.ico"))
         # Find controls
         $controls = @{}
         $window.FindName("cbProfiles") | ForEach-Object { $controls.cbProfiles = $_ }
@@ -410,8 +410,8 @@ function Show-ConnectionConfigMenu_WPF {
 
         # --- Populate Controls ---
         $controls.cbProfiles.ItemsSource = Get-ProfileList
-        $controls.cbBaud.ItemsSource = @("9600", "19200", "38400", "57600", "115200")
-        $controls.cbDataBits.ItemsSource = @("8", "7")
+        $controls.cbBaud.ItemsSource = @(9600, 19200, 38400, 57600, 115200)
+        $controls.cbDataBits.ItemsSource = @(8, 7)
         $controls.cbParity.ItemsSource = [enum]::GetNames([System.IO.Ports.Parity])
         $controls.cbStopBits.ItemsSource = [enum]::GetNames([System.IO.Ports.StopBits])
         $controls.cbHandshake.ItemsSource = [enum]::GetNames([System.IO.Ports.Handshake])
@@ -421,16 +421,33 @@ function Show-ConnectionConfigMenu_WPF {
         $controls.cbCursorSize.ItemsSource = @("Normal", "Small", "Large")
 
         # --- Event Handlers & Logic ---
+
         $RefreshPortsAction = {
             param($forceUpdate = $false)
+    
             $newPorts = [System.IO.Ports.SerialPort]::GetPortNames()
+    
+            # Check if an update is needed
             if ($forceUpdate -or (Compare-Object $controls.cbPort.ItemsSource $newPorts)) {
                 $selectedPort = $controls.cbPort.SelectedItem
                 $controls.cbPort.ItemsSource = $newPorts
-                if ($newPorts -contains $selectedPort) { $controls.cbPort.SelectedItem = $selectedPort }
-                elseif ($newPorts.Count -gt 0) { $controls.cbPort.SelectedIndex = 0 }
+        
+                # Try to restore the previous selection
+                if ($newPorts -contains $selectedPort) { 
+                    $controls.cbPort.SelectedItem = $selectedPort 
+                }
+                # Condition 2: List is populated, default to first item
+                elseif ($newPorts.Count -gt 0) { 
+                    $controls.cbPort.SelectedIndex = 0 
+                }
+                # Condition 1: List is empty, show "None" placeholder
+                else {
+                    $controls.cbPort.SelectedItem = $null
+                    $controls.cbPort.Text = "None"
+                }
             }
         }
+
         $controls.btnRefreshPorts.add_Click({ $RefreshPortsAction.Invoke($true) })
         $RefreshPortsAction.Invoke($true)
 
@@ -451,7 +468,18 @@ function Show-ConnectionConfigMenu_WPF {
                 "SSH"    { $controls.rbSsh.IsChecked = $true }
                 "Telnet" { $controls.rbTelnet.IsChecked = $true }
             }
-            $controls.cbPort.SelectedItem = $profile.COMPort
+            #$controls.cbPort.SelectedItem = $profile.COMPort
+                    # --- Updated Profile Logic ---
+            # Safely set the saved port from the profile *only if it exists* in the new list.
+            if ($controls.cbPort.ItemsSource -contains $profile.COMPort) {
+                $controls.cbPort.SelectedItem = $profile.COMPort
+            } 
+            # If the saved port is invalid AND the list is empty,
+            # make sure the "None" placeholder is still visible.
+            elseif ($controls.cbPort.ItemsSource.Count -eq 0) {
+                $controls.cbPort.SelectedItem = $null
+                $controls.cbPort.Text = "None"
+            }
             $controls.cbBaud.SelectedItem = $profile.BaudRate
             $controls.cbDataBits.SelectedItem = $profile.DataBits
             $controls.cbParity.SelectedItem = $profile.Parity
