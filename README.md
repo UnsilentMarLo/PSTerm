@@ -56,13 +56,14 @@ The compiled executable will be placed in the root directory.
 ## Project Structure
 
 -   `src/`: Contains the main source code for the application.
-    -   `PSTerm.ps1`: The main script file, containing the application logic.
-    -   `ui.ps1`: The script file that defines the user interface for both WPF and Windows Forms.
--   `lib/`: Contains the required `Posh-SSH` module.
--   `Compile/`: Contains the `PS2EXE` module used for compiling the application.
--   `ConnectionConfig.xaml`: The XAML file that defines the WPF user interface.
--   `PSTerm.ps1`: The distribution copy of the main script.
+    -   `src/PSTerm.ps1`: The main script file, containing the application logic.
+    -   `src/ui.ps1`: The script file that defines the user interface for both WPF and Windows Forms.
+    -   `src/lib/`: Contains the required `Posh-SSH` module.
+    -   `src/ConnectionConfig.xaml`: The XAML file that defines the WPF user interface.
+    -   `src/PSTerm.ps1`: The distribution copy of the main script.
 -   `Compile.ps1`: The script used to compile the application into an executable.
+-   `PSTerm.lnk`: A dynamic shortcut to launch the application without compiling.
+-   `Compile/`: Contains the `PS2EXE` module used for compiling the application.
 
 ## Contributing
 
