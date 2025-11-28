@@ -471,7 +471,7 @@ function Start-SerialSession {
                 }
             }
 
-            [Console]::TreatControlCAsInput = $true
+            try { [Console]::TreatControlCAsInput = $true } catch { Write-Verbose "Could not set Console Mode: $_" }
             $logger = $null
             $keepAliveJob = $null
             $receiveEvent = $null
@@ -522,17 +522,25 @@ function Start-SerialSession {
             } -MessageData ([PSCustomObject]@{Port = $Port; Logger = $logger; Config = $Config })
 
             # Main loop for user input
+            $consoleInputBroken = $false
             while ($true) {
-                if ([Console]::KeyAvailable) {
-                    $key = [Console]::ReadKey($true)
-                    if ($key.Key -eq 'Escape') { break }
+                if (-not $consoleInputBroken) {
+                    try {
+                        if ([Console]::KeyAvailable) {
+                            $key = [Console]::ReadKey($true)
+                            if ($key.Key -eq 'Escape') { break }
 
-                    $output = if ($inputHelpers.ContainsKey($key.Key)) { $inputHelpers[$key.Key] } else { $key.KeyChar }
-                    $Port.Write($output)
+                            $output = if ($inputHelpers.ContainsKey($key.Key)) { $inputHelpers[$key.Key] } else { $key.KeyChar }
+                            $Port.Write($output)
 
-                    if ($logger) {
-                        $dataToLog = if ($Config.RawLogData) { $output } else { Remove-AnsiEscapeSequences $output }
-                        $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = $dataToLog })
+                            if ($logger) {
+                                $dataToLog = if ($Config.RawLogData) { $output } else { Remove-AnsiEscapeSequences $output }
+                                $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = $dataToLog })
+                            }
+                        }
+                    } catch {
+                        Write-Warning "Interactive console input not supported in this environment. Input disabled."
+                        $consoleInputBroken = $true
                     }
                 }
                 Start-Sleep -Milliseconds 10
@@ -552,7 +560,7 @@ function Start-SerialSession {
             }
             if ($logger) { Stop-SessionLogger $logger }
             if ($Port -and $Port.IsOpen) { $Port.Close() }
-            [Console]::TreatControlCAsInput = $false
+            try { [Console]::TreatControlCAsInput = $false } catch { }
         }
 
         # Session Ended Menu
@@ -665,7 +673,7 @@ function Start-SshSession {
         }
         # --- End Echo Detection ---
 
-        [Console]::TreatControlCAsInput = $true
+        try { [Console]::TreatControlCAsInput = $true } catch { Write-Verbose "Could not set Console Mode: $_" }
 
         Write-Host "--- SSH Session Started. Press ESC in the console to exit. ---`n" -ForegroundColor Green
 
@@ -706,6 +714,7 @@ function Start-SshSession {
         }
 
         # Main interactive loop
+        $consoleInputBroken = $false
         while ($client.IsConnected) {
             try {
                 if ($shellStream.DataAvailable) {
@@ -720,18 +729,25 @@ function Start-SshSession {
                     }
                 }
 
-                if ([Console]::KeyAvailable) {
-                    $key = [Console]::ReadKey($true)
-                    if ($key.Key -eq 'Escape') { break }
+                if (-not $consoleInputBroken) {
+                    try {
+                        if ([Console]::KeyAvailable) {
+                            $key = [Console]::ReadKey($true)
+                            if ($key.Key -eq 'Escape') { break }
 
-                    $output = if ($inputHelpers.ContainsKey($key.Key)) { $inputHelpers[$key.Key] } else { $key.KeyChar }
-                    $bytes = [System.Text.Encoding]::UTF8.GetBytes($output)
-                    $shellStream.Write($bytes, 0, $bytes.Length)
-                    $shellStream.Flush()
+                            $output = if ($inputHelpers.ContainsKey($key.Key)) { $inputHelpers[$key.Key] } else { $key.KeyChar }
+                            $bytes = [System.Text.Encoding]::UTF8.GetBytes($output)
+                            $shellStream.Write($bytes, 0, $bytes.Length)
+                            $shellStream.Flush()
 
-                    if ($logger -and $logUserInput) {
-                        $dataToLog = if ($Config.RawLogData) { $output } else { Remove-AnsiEscapeSequences $output }
-                        $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = $dataToLog })
+                            if ($logger -and $logUserInput) {
+                                $dataToLog = if ($Config.RawLogData) { $output } else { Remove-AnsiEscapeSequences $output }
+                                $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = $dataToLog })
+                            }
+                        }
+                    } catch {
+                        Write-Warning "Interactive console input not supported. Input disabled."
+                        $consoleInputBroken = $true
                     }
                 }
                 Start-Sleep -Milliseconds 20
@@ -760,7 +776,7 @@ function Start-SshSession {
         if ($logger) { Stop-SessionLogger $logger }
         if ($shellStream) { $shellStream.Dispose() }
         if ($poshSession) { Remove-SSHSession -SSHSession $poshSession }
-        [Console]::TreatControlCAsInput = $false
+        try { [Console]::TreatControlCAsInput = $false } catch { }
     }
 
     # Session Ended Menu
@@ -859,7 +875,7 @@ function Start-TelnetSession {
             }
         } -ArgumentList ([ref]$stream), ([ref]$logger.Queue), $Config.RawLogData
 
-        [Console]::TreatControlCAsInput = $true
+        try { [Console]::TreatControlCAsInput = $true } catch { Write-Verbose "Could not set Console Mode: $_" }
 
         $inputHelpers = [Collections.Generic.Dictionary[ConsoleKey, String]]::new()
         $inputHelpers.Add("UpArrow", "$([char]27)[A"); $inputHelpers.Add("DownArrow", "$([char]27)[B")
@@ -886,18 +902,26 @@ function Start-TelnetSession {
             $keepAliveJob = Start-SessionKeepAlive -Stream $stream
         }
 
+            $consoleInputBroken = $false
             while ($client.Connected -and $readerJob.State -in @('Running', 'NotStarted')) {
-                if ([Console]::KeyAvailable) {
-                    $key = [Console]::ReadKey($true)
-                    if ($key.Key -eq 'Escape') { break }
+                if (-not $consoleInputBroken) {
+                    try {
+                        if ([Console]::KeyAvailable) {
+                            $key = [Console]::ReadKey($true)
+                            if ($key.Key -eq 'Escape') { break }
 
-                    $output = if ($inputHelpers.ContainsKey($key.Key)) { $inputHelpers[$key.Key] } else { $key.KeyChar }
-                    $bytes = [System.Text.Encoding]::ASCII.GetBytes($output)
-                    $stream.Write($bytes, 0, $bytes.Length)
+                            $output = if ($inputHelpers.ContainsKey($key.Key)) { $inputHelpers[$key.Key] } else { $key.KeyChar }
+                            $bytes = [System.Text.Encoding]::ASCII.GetBytes($output)
+                            $stream.Write($bytes, 0, $bytes.Length)
 
-                    if ($logger) {
-                        $dataToLog = if ($Config.RawLogData) { $output } else { Remove-AnsiEscapeSequences $output }
-                        $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = $dataToLog })
+                            if ($logger) {
+                                $dataToLog = if ($Config.RawLogData) { $output } else { Remove-AnsiEscapeSequences $output }
+                                $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = $dataToLog })
+                            }
+                        }
+                    } catch {
+                        Write-Warning "Interactive console input not supported. Input disabled."
+                        $consoleInputBroken = $true
                     }
                 }
                 Start-Sleep -Milliseconds 20
@@ -913,7 +937,7 @@ function Start-TelnetSession {
             if ($logger) { Stop-SessionLogger $logger }
             if ($stream) { $stream.Close() }
             if ($client) { $client.Close() }
-            [Console]::TreatControlCAsInput = $false
+            try { [Console]::TreatControlCAsInput = $false } catch { }
         }
         
         # Session Ended Menu

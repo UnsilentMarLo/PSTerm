@@ -20,7 +20,9 @@
 function Show-ConnectionConfigMenu {
 
     $consoleHandle = [ConsoleUtils]::GetConsoleWindow()
-    [ConsoleUtils]::ShowWindow($consoleHandle, 0) # Hide console
+    if ($consoleHandle -ne [IntPtr]::Zero) {
+        [ConsoleUtils]::ShowWindow($consoleHandle, 0) # Hide console
+    }
 
     $form = New-Object Windows.Forms.Form
     $form.Text = "Connection Configuration"
@@ -340,7 +342,9 @@ function Show-ConnectionConfigMenu {
             LogFilePath = $txtLogFilePath.Text; RawLogData = $chkRawLogData.Checked; ObfuscatePasswords = $chkObfuscate.Checked
         }
     }
-    [ConsoleUtils]::ShowWindow($consoleHandle, 5) # Show console
+    if ($consoleHandle -ne [IntPtr]::Zero) {
+        [ConsoleUtils]::ShowWindow($consoleHandle, 5) # Show console
+    }
     $form.Dispose()
     return $result
 }
@@ -356,7 +360,9 @@ function Show-ConnectionConfigMenu_WPF {
     )
 
     $consoleHandle = [ConsoleUtils]::GetConsoleWindow()
-    [ConsoleUtils]::ShowWindow($consoleHandle, 0) # Hide console
+    if ($consoleHandle -ne [IntPtr]::Zero) {
+        [ConsoleUtils]::ShowWindow($consoleHandle, 0) # Hide console
+    }
 
     try {
         $brushConverter = New-Object System.Windows.Media.BrushConverter
@@ -795,7 +801,9 @@ function Show-ConnectionConfigMenu_WPF {
         return 'Cancel'
     }
     finally {
-        [ConsoleUtils]::ShowWindow($consoleHandle, 5) # Show console
+        if ($consoleHandle -ne [IntPtr]::Zero) {
+            [ConsoleUtils]::ShowWindow($consoleHandle, 5) # Show console
+        }
     }
 }
 
