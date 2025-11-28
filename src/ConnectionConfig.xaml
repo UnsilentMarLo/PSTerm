@@ -1,28 +1,280 @@
-<!--
-    PSTerm - A powerful native PowerShell Serial/SSH/Telnet Terminal.
-    Copyright (C) 2025 Marlo K <Plays.xenon@yahoo.de>
-
-    This program is free software: you can redistribute it and/or modify
-    it under the terms of the GNU General Public License as published by
-    the Free Software Foundation, either version 3 of the License, or
-    (at your option) any later version.
-
-    This program is distributed in the hope that it will be useful,
-    but WITHOUT ANY WARRANTY; without even the implied warranty of
-    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-    GNU General Public License for more details.
-
-    You should have received a copy of the GNU General Public License
-    along with this program.  If not, see <https://www.gnu.org/licenses/>.
--->
 <Window xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         Title="Connection Configuration" 
         SizeToContent="WidthAndHeight" 
         WindowStartupLocation="CenterScreen"
         ResizeMode="NoResize"
-        FontFamily="Segoe UI">
-    <Grid Margin="10">
+        FontFamily="Segoe UI"
+        Background="{DynamicResource WindowBackground}"
+        Foreground="{DynamicResource TextColor}"
+        FontSize="14">
+    
+    <Window.Resources>
+        <!-- Toggle Switch Style for CheckBox -->
+        <Style x:Key="ToggleSwitchStyle" TargetType="CheckBox">
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="CheckBox">
+                        <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+                            <Grid Background="Transparent" Height="20" Width="40">
+                                <Border x:Name="Border" 
+                                        Background="{DynamicResource ToggleOff}" 
+                                        CornerRadius="10" 
+                                        BorderThickness="0">
+                                    <Ellipse x:Name="Dot" 
+                                             Fill="{DynamicResource ToggleDot}" 
+                                             Width="12" Height="12" 
+                                             HorizontalAlignment="Left" 
+                                             Margin="4,0,0,0"/>
+                                </Border>
+                            </Grid>
+                            <ContentPresenter Margin="8,0,0,0" VerticalAlignment="Center"/>
+                        </StackPanel>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Border" Property="Background" Value="{DynamicResource AccentColor}"/>
+                                <Setter TargetName="Dot" Property="HorizontalAlignment" Value="Right"/>
+                                <Setter TargetName="Dot" Property="Margin" Value="0,0,4,0"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Segmented Radio Button Style -->
+        <Style x:Key="SegmentedRadioStyle" TargetType="RadioButton">
+            <Setter Property="Cursor" Value="Hand"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextColor}"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="RadioButton">
+                        <Border x:Name="Border" Background="Transparent" 
+                                BorderBrush="{DynamicResource BorderColor}" 
+                                BorderThickness="1" 
+                                CornerRadius="4" 
+                                Padding="15,6" 
+                                Margin="0,0,10,0">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsChecked" Value="True">
+                                <Setter TargetName="Border" Property="Background" Value="{DynamicResource AccentColor}"/>
+                                <Setter TargetName="Border" Property="BorderBrush" Value="{DynamicResource AccentColor}"/>
+                                <Setter Property="Foreground" Value="White"/>
+                            </Trigger>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Border" Property="BorderBrush" Value="{DynamicResource AccentColor}"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Modern Button Style -->
+        <Style TargetType="Button">
+            <Setter Property="Background" Value="{DynamicResource ControlBackground}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextColor}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderColor}"/>
+            <Setter Property="BorderThickness" Value="1"/>
+            <Setter Property="Padding" Value="10,5"/>
+            <Setter Property="Margin" Value="4"/>
+            <Setter Property="FontSize" Value="14"/>
+            <Setter Property="MinHeight" Value="32"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="Button">
+                        <Border x:Name="border" Background="{TemplateBinding Background}" 
+                                BorderBrush="{TemplateBinding BorderBrush}" 
+                                BorderThickness="{TemplateBinding BorderThickness}" 
+                                CornerRadius="4">
+                            <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" Margin="{TemplateBinding Padding}"/>
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="{DynamicResource ControlHover}"/>
+                            </Trigger>
+                            <Trigger Property="IsPressed" Value="True">
+                                <Setter TargetName="border" Property="Background" Value="{DynamicResource AccentColor}"/>
+                                <Setter Property="Foreground" Value="White"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Modern GroupBox Style -->
+        <Style TargetType="GroupBox">
+            <Setter Property="Foreground" Value="{DynamicResource TextColor}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderColor}"/>
+            <Setter Property="Margin" Value="0,0,0,10"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="GroupBox">
+                        <Grid>
+                            <Grid.RowDefinitions>
+                                <RowDefinition Height="Auto"/>
+                                <RowDefinition Height="*"/>
+                            </Grid.RowDefinitions>
+                            <!-- Main Border -->
+                            <Border Grid.Row="0" Grid.RowSpan="2" BorderThickness="1" BorderBrush="{TemplateBinding BorderBrush}" CornerRadius="4" Margin="0,10,0,0"/>
+                            <!-- Header Background Mask -->
+                            <Border Grid.Row="0" Background="{DynamicResource WindowBackground}" HorizontalAlignment="Left" Margin="10,0,0,0" Padding="5,0">
+                                <ContentPresenter ContentSource="Header" RecognizesAccessKey="True" TextElement.FontWeight="SemiBold"/>
+                            </Border>
+                            <!-- Content -->
+                            <ContentPresenter Grid.Row="1" Margin="10,5,10,10"/>
+                        </Grid>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- ComboBox Toggle Button Template -->
+        <ControlTemplate x:Key="ComboBoxToggleButton" TargetType="ToggleButton">
+            <Grid>
+                <Grid.ColumnDefinitions>
+                    <ColumnDefinition />
+                    <ColumnDefinition Width="30" />
+                </Grid.ColumnDefinitions>
+                <Border x:Name="Border" Grid.ColumnSpan="2" CornerRadius="4"
+                        Background="{TemplateBinding Background}"
+                        BorderBrush="{TemplateBinding BorderBrush}"
+                        BorderThickness="1" />
+                <Path x:Name="Arrow" Grid.Column="1" Fill="{TemplateBinding Foreground}"
+                      HorizontalAlignment="Center" VerticalAlignment="Center"
+                      Data="M0,0 L5,5 L10,0 Z" />
+            </Grid>
+            <ControlTemplate.Triggers>
+                <Trigger Property="IsMouseOver" Value="True">
+                    <Setter TargetName="Border" Property="Background" Value="{DynamicResource ControlHover}"/>
+                </Trigger>
+            </ControlTemplate.Triggers>
+        </ControlTemplate>
+
+        <!-- Modern ComboBox Style -->
+        <Style TargetType="ComboBox">
+            <Setter Property="Background" Value="{DynamicResource ControlBackground}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextColor}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderColor}"/>
+            <Setter Property="Padding" Value="8,5"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="MinHeight" Value="32"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBox">
+                        <Grid>
+                            <ToggleButton Name="ToggleButton" Template="{StaticResource ComboBoxToggleButton}"
+                                          Grid.Column="2" Focusable="false"
+                                          IsChecked="{Binding Path=IsDropDownOpen,Mode=TwoWay,RelativeSource={RelativeSource TemplatedParent}}"
+                                          ClickMode="Press"
+                                          Background="{TemplateBinding Background}"
+                                          BorderBrush="{TemplateBinding BorderBrush}"
+                                          Foreground="{TemplateBinding Foreground}"/>
+                            <ContentPresenter Name="ContentSite" IsHitTestVisible="False"  
+                                              Content="{TemplateBinding SelectionBoxItem}" 
+                                              ContentTemplate="{TemplateBinding SelectionBoxItemTemplate}" 
+                                              ContentTemplateSelector="{TemplateBinding ItemTemplateSelector}" 
+                                              Margin="10,3,30,3" VerticalAlignment="Center" HorizontalAlignment="Left" />
+                            <TextBox x:Name="PART_EditableTextBox" Style="{x:Null}" 
+                                     HorizontalAlignment="Left" VerticalAlignment="Center" 
+                                     Margin="6,3,30,3" Focusable="True" 
+                                     Background="Transparent" Foreground="{TemplateBinding Foreground}" BorderThickness="0"
+                                     Visibility="Hidden" IsReadOnly="{TemplateBinding IsReadOnly}"/>
+                            <Popup Name="Popup" Placement="Bottom" IsOpen="{TemplateBinding IsDropDownOpen}" AllowsTransparency="True" Focusable="False" PopupAnimation="Slide">
+                                <Grid Name="DropDown" SnapsToDevicePixels="True" MinWidth="{TemplateBinding ActualWidth}" MaxHeight="{TemplateBinding MaxDropDownHeight}">
+                                    <Border x:Name="DropDownBorder" Background="{DynamicResource WindowBackground}" BorderThickness="1" BorderBrush="{DynamicResource BorderColor}" CornerRadius="4"/>
+                                    <ScrollViewer Margin="2" SnapsToDevicePixels="True">
+                                        <StackPanel IsItemsHost="True" KeyboardNavigation.DirectionalNavigation="Contained" />
+                                    </ScrollViewer>
+                                </Grid>
+                            </Popup>
+                        </Grid>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="HasItems" Value="false">
+                                <Setter TargetName="DropDownBorder" Property="MinHeight" Value="95"/>
+                            </Trigger>
+                            <Trigger Property="IsEditable" Value="true">
+                                <Setter TargetName="PART_EditableTextBox" Property="Visibility" Value="Visible"/>
+                                <Setter TargetName="ContentSite" Property="Visibility" Value="Hidden"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- ComboBoxItem Style -->
+        <Style TargetType="ComboBoxItem">
+            <Setter Property="Foreground" Value="{DynamicResource TextColor}"/>
+            <Setter Property="Padding" Value="5"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="ComboBoxItem">
+                        <Border x:Name="Border" Padding="{TemplateBinding Padding}" Background="Transparent">
+                            <ContentPresenter />
+                        </Border>
+                        <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="Border" Property="Background" Value="{DynamicResource AccentColor}"/>
+                                <Setter Property="Foreground" Value="White"/>
+                            </Trigger>
+                            <Trigger Property="IsSelected" Value="True">
+                                <Setter TargetName="Border" Property="Background" Value="{DynamicResource AccentColor}"/>
+                                <Setter Property="Foreground" Value="White"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- Modern TextBox Style -->
+        <Style TargetType="TextBox">
+            <Setter Property="Background" Value="{DynamicResource ControlBackground}"/>
+            <Setter Property="Foreground" Value="{DynamicResource TextColor}"/>
+            <Setter Property="BorderBrush" Value="{DynamicResource BorderColor}"/>
+            <Setter Property="Padding" Value="8,5"/>
+            <Setter Property="VerticalContentAlignment" Value="Center"/>
+            <Setter Property="MinHeight" Value="32"/>
+            <Setter Property="Template">
+                <Setter.Value>
+                    <ControlTemplate TargetType="TextBox">
+                        <Border x:Name="border" Background="{TemplateBinding Background}" 
+                                BorderBrush="{TemplateBinding BorderBrush}" 
+                                BorderThickness="1" 
+                                CornerRadius="4">
+                            <ScrollViewer x:Name="PART_ContentHost"/>
+                        </Border>
+                         <ControlTemplate.Triggers>
+                            <Trigger Property="IsMouseOver" Value="True">
+                                <Setter TargetName="border" Property="BorderBrush" Value="{DynamicResource AccentColor}"/>
+                            </Trigger>
+                             <Trigger Property="IsFocused" Value="True">
+                                <Setter TargetName="border" Property="BorderBrush" Value="{DynamicResource AccentColor}"/>
+                                <Setter TargetName="border" Property="BorderThickness" Value="2"/>
+                            </Trigger>
+                        </ControlTemplate.Triggers>
+                    </ControlTemplate>
+                </Setter.Value>
+            </Setter>
+        </Style>
+
+        <!-- TextBlock Style -->
+        <Style TargetType="TextBlock">
+            <Setter Property="Foreground" Value="{DynamicResource TextColor}"/>
+            <Setter Property="VerticalAlignment" Value="Center"/>
+        </Style>
+
+        <!-- CheckBox Default Style (Apply Toggle) -->
+        <Style TargetType="CheckBox" BasedOn="{StaticResource ToggleSwitchStyle}"/>
+
+    </Window.Resources>
+
+    <Grid Margin="20">
         <Grid.RowDefinitions>
             <RowDefinition Height="Auto"/>
             <RowDefinition Height="Auto"/>
@@ -35,35 +287,45 @@
         </Grid.ColumnDefinitions>
 
         <!-- Profile Management -->
-        <GroupBox Header="Profile" Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2" Margin="5">
-            <Grid>
+        <GroupBox Header="Profile Management" Grid.Row="0" Grid.Column="0" Grid.ColumnSpan="2">
+            <Grid Margin="10">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto"/>
+                    <RowDefinition Height="Auto"/>
+                </Grid.RowDefinitions>
                 <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto"/>
+                    <ColumnDefinition Width="100"/>
                     <ColumnDefinition Width="*"/>
                     <ColumnDefinition Width="Auto"/>
-                    <ColumnDefinition Width="Auto"/>
                 </Grid.ColumnDefinitions>
-                <Label Content="Select Profile:" VerticalAlignment="Center" Margin="5"/>
-                <ComboBox x:Name="cbProfiles" Grid.Column="1" VerticalAlignment="Center" Margin="5" IsEditable="True"/>
-                <Button x:Name="btnSaveProfile" Content="Save" Grid.Column="2" Margin="5,5,0,5" Padding="10,2"/>
-                <Button x:Name="btnDeleteProfile" Content="Delete" Grid.Column="3" Margin="5" Padding="10,2"/>
+
+                <!-- Row 0: Load Profile -->
+                <TextBlock Text="Load Profile:" Grid.Row="0" Grid.Column="0" VerticalAlignment="Center"/>
+                <ComboBox x:Name="cbLoadProfile" Grid.Row="0" Grid.Column="1" Margin="0,0,10,10" IsEditable="False" VerticalAlignment="Center"/>
+                <Button x:Name="btnDeleteProfile" Content="Delete" Grid.Row="0" Grid.Column="2" Margin="0,0,0,10" Width="90" VerticalAlignment="Center"/>
+
+                <!-- Row 1: Save Profile -->
+                <TextBlock Text="Save As:" Grid.Row="1" Grid.Column="0" VerticalAlignment="Center"/>
+                <TextBox x:Name="txtNewProfileName" Grid.Row="1" Grid.Column="1" Margin="0,0,10,0" VerticalAlignment="Center"/>
+                <Button x:Name="btnSaveProfile" Content="Save" Grid.Row="1" Grid.Column="2" Width="90" VerticalAlignment="Center"/>
             </Grid>
         </GroupBox>
 
         <!-- Left Pane -->
-        <StackPanel Grid.Row="1" Grid.Column="0" Grid.RowSpan="2">
+        <StackPanel Grid.Row="1" Grid.Column="0" Grid.RowSpan="2" Margin="0,0,20,0">
             <!-- Connection Type -->
-            <GroupBox Header="Connection Type" Margin="5">
-                <StackPanel Orientation="Horizontal" Margin="5">
-                    <RadioButton x:Name="rbSerial" Content="Serial" Margin="5" IsChecked="True"/>
-                    <RadioButton x:Name="rbSsh" Content="SSH" Margin="5"/>
-                    <RadioButton x:Name="rbTelnet" Content="Telnet" Margin="5"/>
+            <GroupBox Header="Connection Type">
+                <StackPanel Orientation="Horizontal" Margin="10">
+                    <!-- Apply Segmented Style -->
+                    <RadioButton x:Name="rbSerial" Content="Serial" IsChecked="True" Style="{StaticResource SegmentedRadioStyle}" VerticalAlignment="Center"/>
+                    <RadioButton x:Name="rbSsh" Content="SSH" Style="{StaticResource SegmentedRadioStyle}" VerticalAlignment="Center"/>
+                    <RadioButton x:Name="rbTelnet" Content="Telnet" Style="{StaticResource SegmentedRadioStyle}" VerticalAlignment="Center"/>
                 </StackPanel>
             </GroupBox>
 
-            <!-- Connection Specifics -->
-            <GroupBox Header="Connection Settings" Margin="5">
-                <StackPanel>
+            <!-- Connection Settings -->
+            <GroupBox Header="Connection Settings">
+                <StackPanel Margin="10">
                     <!-- Serial Panel -->
                     <Grid x:Name="pnlSerial">
                         <Grid.RowDefinitions>
@@ -72,104 +334,127 @@
                             <RowDefinition Height="Auto"/>
                         </Grid.RowDefinitions>
                         <Grid.ColumnDefinitions>
-                            <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
+                            <ColumnDefinition Width="110"/><ColumnDefinition Width="160"/><ColumnDefinition Width="Auto"/>
                         </Grid.ColumnDefinitions>
 
-                        <Label Content="COM Port:" Grid.Row="0" Grid.Column="0" VerticalAlignment="Center"/>
-                        <ComboBox x:Name="cbPort" Grid.Row="0" Grid.Column="1" VerticalAlignment="Center" IsEditable="True" IsReadOnly="True"/>
-                        <Button x:Name="btnRefreshPorts" Content="Refresh" Grid.Row="0" Grid.Column="2" Padding="5,2" Margin="0,5,5,5"/>
+                        <TextBlock Text="COM Port:" Grid.Row="0" Grid.Column="0" VerticalAlignment="Center"/>
+                        <ComboBox x:Name="cbPort" Grid.Row="0" Grid.Column="1" Margin="0,4" IsEditable="True" IsReadOnly="True" VerticalAlignment="Center"/>
+                        <Button x:Name="btnRefreshPorts" Content="Refresh" Grid.Row="0" Grid.Column="2" Margin="5,0,0,0" VerticalAlignment="Center"/>
 
-                        <Label Content="Baud Rate:" Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                        <ComboBox x:Name="cbBaud" Grid.Row="1" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
-                        <Label Content="Data Bits:" Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                        <ComboBox x:Name="cbDataBits" Grid.Row="2" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
-                        <Label Content="Parity:" Grid.Row="3" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                        <ComboBox x:Name="cbParity" Grid.Row="3" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
-                        <Label Content="Stop Bits:" Grid.Row="4" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                        <ComboBox x:Name="cbStopBits" Grid.Row="4" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
-                        <Label Content="Handshake:" Grid.Row="5" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                        <ComboBox x:Name="cbHandshake" Grid.Row="5" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
-                        <Label Content="Enable DTR:" Grid.Row="6" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                        <CheckBox x:Name="chkDtrEnable" Grid.Row="6" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
+                        <TextBlock Text="Baud Rate:" Grid.Row="1" Grid.Column="0" VerticalAlignment="Center"/>
+                        <ComboBox x:Name="cbBaud" Grid.Row="1" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
+                        <TextBlock Text="Data Bits:" Grid.Row="2" Grid.Column="0" VerticalAlignment="Center"/>
+                        <ComboBox x:Name="cbDataBits" Grid.Row="2" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
+                        <TextBlock Text="Parity:" Grid.Row="3" Grid.Column="0" VerticalAlignment="Center"/>
+                        <ComboBox x:Name="cbParity" Grid.Row="3" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
+                        <TextBlock Text="Stop Bits:" Grid.Row="4" Grid.Column="0" VerticalAlignment="Center"/>
+                        <ComboBox x:Name="cbStopBits" Grid.Row="4" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
+                        <TextBlock Text="Handshake:" Grid.Row="5" Grid.Column="0" VerticalAlignment="Center"/>
+                        <ComboBox x:Name="cbHandshake" Grid.Row="5" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
+                        <TextBlock Text="Enable DTR:" Grid.Row="6" Grid.Column="0" VerticalAlignment="Center"/>
+                        <CheckBox x:Name="chkDtrEnable" Grid.Row="6" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
                     </Grid>
                     <!-- SSH Panel -->
                     <Grid x:Name="pnlSsh" Visibility="Collapsed">
                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                        <Label Content="Host / IP:" Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                        <TextBox x:Name="txtSshHost" Grid.Row="0" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
-                        <Label Content="Username:" Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                        <TextBox x:Name="txtSshUser" Grid.Row="1" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
-                        <Label Content="Port:" Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                        <TextBox x:Name="txtSshPort" Grid.Row="2" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="110"/><ColumnDefinition Width="200"/></Grid.ColumnDefinitions>
+                        <TextBlock Text="Host / IP:" Grid.Row="0" Grid.Column="0" VerticalAlignment="Center"/>
+                        <TextBox x:Name="txtSshHost" Grid.Row="0" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
+                        <TextBlock Text="Username:" Grid.Row="1" Grid.Column="0" VerticalAlignment="Center"/>
+                        <TextBox x:Name="txtSshUser" Grid.Row="1" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
+                        <TextBlock Text="Port:" Grid.Row="2" Grid.Column="0" VerticalAlignment="Center"/>
+                        <TextBox x:Name="txtSshPort" Grid.Row="2" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
                     </Grid>
                     <!-- Telnet Panel -->
                     <Grid x:Name="pnlTelnet" Visibility="Collapsed">
                         <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-                        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-                        <Label Content="Host / IP:" Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                        <TextBox x:Name="txtTelnetHost" Grid.Row="0" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
-                        <Label Content="Port:" Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                        <TextBox x:Name="txtTelnetPort" Grid.Row="1" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
+                        <Grid.ColumnDefinitions><ColumnDefinition Width="110"/><ColumnDefinition Width="200"/></Grid.ColumnDefinitions>
+                        <TextBlock Text="Host / IP:" Grid.Row="0" Grid.Column="0" VerticalAlignment="Center"/>
+                        <TextBox x:Name="txtTelnetHost" Grid.Row="0" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
+                        <TextBlock Text="Port:" Grid.Row="1" Grid.Column="0" VerticalAlignment="Center"/>
+                        <TextBox x:Name="txtTelnetPort" Grid.Row="1" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
                     </Grid>
                 </StackPanel>
             </GroupBox>
             
             <!-- Auto-Input Script -->
-            <GroupBox Header="Auto-Input Script" Margin="5">
-                <TextBox x:Name="txtAutoInput" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="60" VerticalScrollBarVisibility="Auto" Margin="5"/>
+            <GroupBox Header="Auto-Input Script">
+                <TextBox x:Name="txtAutoInput" AcceptsReturn="True" TextWrapping="Wrap" MinHeight="80" VerticalScrollBarVisibility="Auto" Margin="10" VerticalAlignment="Stretch"/>
             </GroupBox>
         </StackPanel>
 
         <!-- Right Pane -->
-        <GroupBox Header="Terminal and Logging" Grid.Row="1" Grid.Column="1" Margin="5" Grid.RowSpan="2">
-            <Grid>
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
-                    <RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/>
-                </Grid.RowDefinitions>
-                <Grid.ColumnDefinitions>
-                    <ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/>
-                </Grid.ColumnDefinitions>
+        <StackPanel Grid.Row="1" Grid.Column="1" Grid.RowSpan="2" Margin="10,0,0,0">
+            <!-- Terminal Settings -->
+            <GroupBox Header="Terminal Settings">
+                <Grid Margin="10">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="150"/>
+                        <ColumnDefinition Width="*"/>
+                    </Grid.ColumnDefinitions>
 
-                <Label Content="Text Color:" Grid.Row="0" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                <ComboBox x:Name="cbTextColor" Grid.Row="0" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
-                <Label Content="Background Color:" Grid.Row="1" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                <ComboBox x:Name="cbBgColor" Grid.Row="1" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
-                <Label Content="Cursor Size:" Grid.Row="2" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                <ComboBox x:Name="cbCursorSize" Grid.Row="2" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
-                
-                <Label Content="Force Terminal Colors:" Grid.Row="3" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                <CheckBox x:Name="chkForceColors" Grid.Row="3" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
-                <Label Content="Send Keep-Alive:" Grid.Row="4" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                <CheckBox x:Name="chkKeepAlive" Grid.Row="4" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
-                
-                <Label Content="Enable Logging:" Grid.Row="5" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                <CheckBox x:Name="chkBackgroundLogging" Grid.Row="5" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
-                <Label Content="Log File Path:" Grid.Row="6" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                <TextBox x:Name="txtLogFilePath" Grid.Row="6" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
-                <Button x:Name="btnBrowseLog" Content="..." Grid.Row="6" Grid.Column="2" Padding="5,2" Margin="0,5,5,5"/>
+                    <TextBlock Text="Text Color:" Grid.Row="0" Grid.Column="0" VerticalAlignment="Center"/>
+                    <ComboBox x:Name="cbTextColor" Grid.Row="0" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
+                    <TextBlock Text="Background Color:" Grid.Row="1" Grid.Column="0" VerticalAlignment="Center"/>
+                    <ComboBox x:Name="cbBgColor" Grid.Row="1" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
+                    <TextBlock Text="Cursor Size:" Grid.Row="2" Grid.Column="0" VerticalAlignment="Center"/>
+                    <ComboBox x:Name="cbCursorSize" Grid.Row="2" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
+                    <TextBlock Text="Force Terminal Colors:" Grid.Row="3" Grid.Column="0" VerticalAlignment="Center"/>
+                    <CheckBox x:Name="chkForceColors" Grid.Row="3" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
+                    <TextBlock Text="Send Keep-Alive:" Grid.Row="4" Grid.Column="0" VerticalAlignment="Center"/>
+                    <CheckBox x:Name="chkKeepAlive" Grid.Row="4" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
+                </Grid>
+            </GroupBox>
 
-                <Label Content="Log Raw Stream Data:" Grid.Row="7" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                <CheckBox x:Name="chkRawLogData" Grid.Row="7" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
-                <Label Content="Obfuscate Passwords:" Grid.Row="8" Grid.Column="0" VerticalAlignment="Center" Margin="5"/>
-                <CheckBox x:Name="chkObfuscate" Grid.Row="8" Grid.Column="1" VerticalAlignment="Center" Margin="0,5,5,5"/>
-            </Grid>
-        </GroupBox>
+            <!-- Logging Settings -->
+            <GroupBox Header="Logging Settings" Margin="0,15,0,0">
+                <Grid Margin="10">
+                    <Grid.RowDefinitions>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                        <RowDefinition Height="Auto"/>
+                    </Grid.RowDefinitions>
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="150"/>
+                        <ColumnDefinition Width="*"/>
+                        <ColumnDefinition Width="Auto"/>
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock Text="Enable Logging:" Grid.Row="0" Grid.Column="0" VerticalAlignment="Center"/>
+                    <CheckBox x:Name="chkBackgroundLogging" Grid.Row="0" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
+                    
+                    <TextBlock Text="Log File Path:" Grid.Row="1" Grid.Column="0" VerticalAlignment="Center"/>
+                    <TextBox x:Name="txtLogFilePath" Grid.Row="1" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
+                    <Button x:Name="btnBrowseLog" Content="..." Grid.Row="1" Grid.Column="2" Margin="5,0,0,0" VerticalAlignment="Center" Padding="8,4"/>
+
+                    <TextBlock Text="Log Raw Stream Data:" Grid.Row="2" Grid.Column="0" VerticalAlignment="Center"/>
+                    <CheckBox x:Name="chkRawLogData" Grid.Row="2" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
+                    <TextBlock Text="Obfuscate Passwords:" Grid.Row="3" Grid.Column="0" VerticalAlignment="Center"/>
+                    <CheckBox x:Name="chkObfuscate" Grid.Row="3" Grid.Column="1" Margin="0,4" VerticalAlignment="Center"/>
+                </Grid>
+            </GroupBox>
+        </StackPanel>
 
         <!-- Bottom Buttons -->
-        <Grid Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="2">
+        <Grid Grid.Row="3" Grid.Column="0" Grid.ColumnSpan="2" Margin="0,10,0,0">
             <Grid.ColumnDefinitions>
                 <ColumnDefinition Width="Auto"/>
                 <ColumnDefinition Width="*"/>
             </Grid.ColumnDefinitions>
 
-            <Button x:Name="btnAbout" Content="About" HorizontalAlignment="Left" MinWidth="80" Margin="10,5,5,5" Padding="10,2"/>
+            <Button x:Name="btnAbout" Content="About" HorizontalAlignment="Left" MinWidth="80"/>
 
-            <StackPanel Orientation="Horizontal" Grid.Column="1" HorizontalAlignment="Right" Margin="5">
-                <Button x:Name="btnConnect" Content="Connect" IsDefault="True" MinWidth="80" Margin="5" Padding="10,2"/>
-                <Button x:Name="btnCancel" Content="Cancel" IsCancel="True" MinWidth="80" Margin="5" Padding="10,2"/>
+            <StackPanel Orientation="Horizontal" Grid.Column="1" HorizontalAlignment="Right">
+                <Button x:Name="btnConnect" Content="Connect" IsDefault="True" MinWidth="100" Background="{DynamicResource AccentColor}" Foreground="White"/>
+                <Button x:Name="btnCancel" Content="Cancel" IsCancel="True" MinWidth="100"/>
             </StackPanel>
         </Grid>
     </Grid>

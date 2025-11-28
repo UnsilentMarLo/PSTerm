@@ -49,6 +49,12 @@ Add-Type -TypeDefinition @"
         [DllImport("user32.dll")]
         public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
     }
+
+    public class DwmUtils
+    {
+        [DllImport("dwmapi.dll", PreserveSig = true)]
+        public static extern int DwmSetWindowAttribute(IntPtr hwnd, int attr, ref int attrValue, int attrSize);
+    }
 "@
 
 # Determine script base directory reliably
@@ -230,9 +236,53 @@ function Save-Profile($name, $config) {
     $profiles | ConvertTo-Json -Depth 5 | Set-Content -Path $ProfilesFile -Encoding UTF8
 }
 
+function Remove-Profile($name) {
+    if ($ProfilesFile -and (Test-Path $ProfilesFile)) {
+        try {
+            $content = Get-Content -Raw -Path $ProfilesFile
+            if ([string]::IsNullOrWhiteSpace($content)) { return }
+            
+            $profiles = $content | ConvertFrom-Json
+            if ($profiles -isnot [array]) { $profiles = @($profiles) }
+            
+            $profiles = $profiles | Where-Object { $_.Name -ne $name }
+            
+            # Ensure output is a valid JSON array or object
+            $json = $profiles | ConvertTo-Json -Depth 5
+            if ([string]::IsNullOrWhiteSpace($json) -or $json -eq 'null') { $json = "[]" }
+            
+            Set-Content -Path $ProfilesFile -Value $json -Encoding UTF8
+        } catch {
+            Write-Warning "Failed to delete profile '$name': $_"
+        }
+    }
+}
+
 #endregion Profile Management Functions
 
 #region Session Handlers
+
+function Show-SessionEndedMenu {
+    param([string]$Message = "")
+
+    if (-not [string]::IsNullOrWhiteSpace($Message)) {
+        Write-Host "`n$Message" -ForegroundColor Yellow
+    }
+
+    while ($true) {
+        Write-Host "`nConnection Closed. Select an action:" -ForegroundColor Cyan
+        Write-Host "[R] Retry Connection"
+        Write-Host "[A] Auto-Retry until connected (Press Ctrl+C to abort)"
+        Write-Host "[E] Exit to Configuration Menu"
+        
+        $key = [Console]::ReadKey($true)
+        $char = $key.KeyChar.ToString().ToUpper()
+
+        if ($char -in 'R', 'A', 'E') {
+            return $char
+        }
+    }
+}
 
 # Function to remove ANSI escape sequences from a string
 function Remove-AnsiEscapeSequences {
@@ -380,97 +430,138 @@ function Stop-SessionKeepAlive($job) {
 
 function Start-SerialSession {
     param(
-        [System.IO.Ports.SerialPort]$Port,
         [PSCustomObject]$Config
     )
 
-    [Console]::TreatControlCAsInput = $true
-    $logger = $null
-    $keepAliveJob = $null
-    $receiveEvent = $null
+    $autoRetry = $false
 
-    try {
-        # Apply terminal colors if forced
-        if ($Config.ForceTerminalColors) {
-            $Host.UI.RawUI.ForegroundColor = $Config.TextColor
-            $Host.UI.RawUI.BackgroundColor = $Config.BackgroundColor
-            Clear-Host
-        }
-
-		$host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
-
-        if ($Config.BackgroundLogging) {
-            $logger = Start-SessionLogger -LogFilePath $Config.LogFilePath -RawSessionData:$Config.RawLogData -ObfuscatePasswords:$Config.ObfuscatePasswords
-        }
-
-        $inputHelpers = [Collections.Generic.Dictionary[ConsoleKey, String]]::new()
-        $inputHelpers.Add("UpArrow", "$([char]27)[A"); $inputHelpers.Add("DownArrow", "$([char]27)[B")
-        $inputHelpers.Add("RightArrow", "$([char]27)[C"); $inputHelpers.Add("LeftArrow", "$([char]27)[D")
-        $inputHelpers.Add("Delete", $([char]127)); $inputHelpers.Add("Backspace", $([char]8))
-        $inputHelpers.Add("Home", "$([char]27)[H"); $inputHelpers.Add("End", "$([char]27)[F")
-        $inputHelpers.Add("PageUp", "$([char]27)[5~"); $inputHelpers.Add("PageDown", "$([char]27)[6~")
-        $inputHelpers.Add("Insert", "$([char]27)[2~")
-
-        Write-Host "--- Serial Session Started. Press ESC in the console to exit. ---`n" -ForegroundColor Green
-
-        if ($Config.AutoInput) {
-            Write-Host "Sending auto-input..." -ForegroundColor Cyan
-            foreach ($line in $Config.AutoInput.Split("`n")) {
-                $command = $line.Trim()
-                $Port.WriteLine($command)
-                if ($logger) { $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = ($command + "`r`n") }) }
-                Start-Sleep -Milliseconds 200
+    do {
+        $Port = $null
+        try {
+            # Apply terminal colors if forced, else reset to defaults for host compatibility
+            if ($Config.ForceTerminalColors) {
+                $Host.UI.RawUI.ForegroundColor = $Config.TextColor
+                $Host.UI.RawUI.BackgroundColor = $Config.BackgroundColor
+                Clear-Host
+            } else {
+                [Console]::ResetColor()
+                Clear-Host
             }
-        }
 
-        if ($Config.KeepAlive) {
-            $keepAliveJob = Start-SessionKeepAlive -Stream $Port.BaseStream
-        }
+            $host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
 
-        # Register an event for receiving data
-        $receiveEvent = Register-ObjectEvent -InputObject $Port -EventName DataReceived -Action {
-            try {
-                $p = $event.MessageData.Port
-                $log = $event.MessageData.Logger
-                $cfg = $event.MessageData.Config
-                $data = $p.ReadExisting()
-                Write-Host $data -NoNewline
-
-                if ($null -ne $log) {
-                    $dataToLog = if ($cfg.RawLogData) { $data } else { Remove-AnsiEscapeSequences $data }
-                    $log.Queue.Enqueue([PSCustomObject]@{Source = 'Server'; Data = $dataToLog })
+            if ([string]::IsNullOrWhiteSpace($Config.COMPort)) { throw "No COM Port selected." }
+            $Port = New-Object System.IO.Ports.SerialPort($Config.COMPort, $Config.BaudRate, $Config.Parity, $Config.DataBits, $Config.StopBits)
+            $Port.Handshake = $Config.Handshake
+            $Port.DtrEnable = $Config.DtrEnable
+            
+            # Connection Attempt
+            while ($true) {
+                try {
+                    $Port.Open()
+                    break # Connected
+                }
+                catch {
+                    if ($autoRetry) {
+                        Write-Host "`rConnection failed. Retrying in 3 seconds... (Press Ctrl+C to cancel)" -NoNewline -ForegroundColor Yellow
+                        Start-Sleep -Seconds 3
+                    } else {
+                        throw $_
+                    }
                 }
             }
-            catch { Write-Warning "Event handler error: $_" }
-        } -MessageData ([PSCustomObject]@{Port = $Port; Logger = $logger; Config = $Config })
 
-        # Main loop for user input
-        while ($true) {
-            if ([Console]::KeyAvailable) {
-                $key = [Console]::ReadKey($true)
-                if ($key.Key -eq 'Escape') { break }
+            [Console]::TreatControlCAsInput = $true
+            $logger = $null
+            $keepAliveJob = $null
+            $receiveEvent = $null
 
-                $output = if ($inputHelpers.ContainsKey($key.Key)) { $inputHelpers[$key.Key] } else { $key.KeyChar }
-                $port.Write($output)
+            if ($Config.BackgroundLogging) {
+                $logger = Start-SessionLogger -LogFilePath $Config.LogFilePath -RawSessionData:$Config.RawLogData -ObfuscatePasswords:$Config.ObfuscatePasswords
+            }
 
-                if ($logger) {
-                    $dataToLog = if ($Config.RawLogData) { $output } else { Remove-AnsiEscapeSequences $output }
-                    $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = $dataToLog })
+            $inputHelpers = [Collections.Generic.Dictionary[ConsoleKey, String]]::new()
+            $inputHelpers.Add("UpArrow", "$([char]27)[A"); $inputHelpers.Add("DownArrow", "$([char]27)[B")
+            $inputHelpers.Add("RightArrow", "$([char]27)[C"); $inputHelpers.Add("LeftArrow", "$([char]27)[D")
+            $inputHelpers.Add("Delete", $([char]127)); $inputHelpers.Add("Backspace", $([char]8))
+            $inputHelpers.Add("Home", "$([char]27)[H"); $inputHelpers.Add("End", "$([char]27)[F")
+            $inputHelpers.Add("PageUp", "$([char]27)[5~"); $inputHelpers.Add("PageDown", "$([char]27)[6~")
+            $inputHelpers.Add("Insert", "$([char]27)[2~")
+
+            Write-Host "--- Serial Session Started. Press ESC in the console to exit. ---`n" -ForegroundColor Green
+
+            if ($Config.AutoInput) {
+                Write-Host "Sending auto-input..." -ForegroundColor Cyan
+                foreach ($line in $Config.AutoInput.Split("`n")) {
+                    $command = $line.Trim()
+                    $Port.WriteLine($command)
+                    if ($logger) { $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = ($command + "`r`n") }) }
+                    Start-Sleep -Milliseconds 200
                 }
             }
-            Start-Sleep -Milliseconds 10
+
+            if ($Config.KeepAlive) {
+                $keepAliveJob = Start-SessionKeepAlive -Stream $Port.BaseStream
+            }
+
+            # Register an event for receiving data
+            $receiveEvent = Register-ObjectEvent -InputObject $Port -EventName DataReceived -Action {
+                try {
+                    $p = $event.MessageData.Port
+                    $log = $event.MessageData.Logger
+                    $cfg = $event.MessageData.Config
+                    $data = $p.ReadExisting()
+                    Write-Host $data -NoNewline
+
+                    if ($null -ne $log) {
+                        $dataToLog = if ($cfg.RawLogData) { $data } else { Remove-AnsiEscapeSequences $data }
+                        $log.Queue.Enqueue([PSCustomObject]@{Source = 'Server'; Data = $dataToLog })
+                    }
+                }
+                catch { Write-Warning "Event handler error: $_" }
+            } -MessageData ([PSCustomObject]@{Port = $Port; Logger = $logger; Config = $Config })
+
+            # Main loop for user input
+            while ($true) {
+                if ([Console]::KeyAvailable) {
+                    $key = [Console]::ReadKey($true)
+                    if ($key.Key -eq 'Escape') { break }
+
+                    $output = if ($inputHelpers.ContainsKey($key.Key)) { $inputHelpers[$key.Key] } else { $key.KeyChar }
+                    $Port.Write($output)
+
+                    if ($logger) {
+                        $dataToLog = if ($Config.RawLogData) { $output } else { Remove-AnsiEscapeSequences $output }
+                        $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = $dataToLog })
+                    }
+                }
+                Start-Sleep -Milliseconds 10
+            }
         }
-    }
-    finally {
-        Write-Host "`n--- Exiting serial session. ---" -ForegroundColor Yellow
-        if ($keepAliveJob) { Stop-SessionKeepAlive $keepAliveJob }
-        if ($receiveEvent) {
-            Get-EventSubscriber -SourceIdentifier $receiveEvent.Name | Unregister-Event
-            $receiveEvent | Remove-Job -Force
+        catch {
+            if (-not $autoRetry) {
+                Write-Error "Serial session error: $_"
+            }
         }
-        if ($logger) { Stop-SessionLogger $logger }
-        [Console]::TreatControlCAsInput = $false
-    }
+        finally {
+            Write-Host "`n--- Exiting serial session. ---" -ForegroundColor Yellow
+            if ($keepAliveJob) { Stop-SessionKeepAlive $keepAliveJob }
+            if ($receiveEvent) {
+                Get-EventSubscriber -SourceIdentifier $receiveEvent.Name | Unregister-Event
+                $receiveEvent | Remove-Job -Force
+            }
+            if ($logger) { Stop-SessionLogger $logger }
+            if ($Port -and $Port.IsOpen) { $Port.Close() }
+            [Console]::TreatControlCAsInput = $false
+        }
+
+        # Session Ended Menu
+        $action = Show-SessionEndedMenu
+        if ($action -eq 'E') { return }
+        if ($action -eq 'R') { $autoRetry = $false }
+        if ($action -eq 'A') { $autoRetry = $true }
+
+    } while ($true)
 }
 
 function Start-SshSession {
@@ -478,49 +569,68 @@ function Start-SshSession {
         [PSCustomObject]$Config
     )
 
-    $poshSession = $null
-    $client = $null
-    $shellStream = $null
-    $logger = $null
+    $autoRetry = $false
+    # Pre-prompt for credentials so we don't ask on every retry
+    $user = if ($Config.User) { $Config.User } else { Read-Host "Enter SSH username" }
+    $securePassword = Read-Host "Enter SSH password for '$user'" -AsSecureString
+    $credential = New-Object System.Management.Automation.PSCredential ($user, $securePassword)
+    if (-not $credential) { throw "User cancelled the credential prompt." }
 
-    try {
-        # Apply terminal colors if forced
-        if ($Config.ForceTerminalColors) {
-            $Host.UI.RawUI.ForegroundColor = $Config.TextColor
-            $Host.UI.RawUI.BackgroundColor = $Config.BackgroundColor
-            Clear-Host
-        }
-        # Always increase buffer for better scrollback
-        $host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
+    do {
+        $poshSession = $null
+        $client = $null
+        $shellStream = $null
+        $logger = $null
 
-        if ($Config.BackgroundLogging) {
-            $logger = Start-SessionLogger -LogFilePath $Config.LogFilePath -RawSessionData:$Config.RawLogData -ObfuscatePasswords:$Config.ObfuscatePasswords
-        }
+        try {
+            # Apply terminal colors if forced, else reset
+            if ($Config.ForceTerminalColors) {
+                $Host.UI.RawUI.ForegroundColor = $Config.TextColor
+                $Host.UI.RawUI.BackgroundColor = $Config.BackgroundColor
+                Clear-Host
+            } else {
+                [Console]::ResetColor()
+                Clear-Host
+            }
+            # Always increase buffer for better scrollback
+            $host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
 
-        Write-Host "Connecting to $($Config.Host) on port $($Config.SshPort)..." -ForegroundColor Cyan
-        $user = if ($Config.User) { $Config.User } else { Read-Host "Enter SSH username" }
-        $securePassword = Read-Host "Enter SSH password for '$user'" -AsSecureString
-        $credential = New-Object System.Management.Automation.PSCredential ($user, $securePassword)
+            while ($true) {
+                try {
+                    Write-Host "Connecting to $($Config.Host) on port $($Config.SshPort)..." -ForegroundColor Cyan
+                    
+                    $sessionParams = @{
+                        ComputerName = $Config.Host
+                        Port         = $Config.SshPort
+                        Credential   = $credential
+                        ErrorAction  = 'Stop'
+                    }
+                    if ($Config.KeepAlive) {
+                        $sessionParams['KeepAliveInterval'] = 30 # Posh-SSH KeepAlive is in seconds
+                    }
 
-        if (-not $credential) { throw "User cancelled the credential prompt." }
+                    $poshSession = New-SSHSession @sessionParams
+                    $client = ($poshSession | Select-Object -First 1).Session
+                    if (-not $client.IsConnected) { throw "Failed to establish an SSH connection." }
+                    break # Connected
+                }
+                catch {
+                    if ($autoRetry) {
+                        Write-Host "Connection failed: $($_.Exception.Message). Retrying in 3 seconds... (Press Ctrl+C to cancel)" -ForegroundColor Yellow
+                        Start-Sleep -Seconds 3
+                    } else {
+                        throw $_
+                    }
+                }
+            }
 
-        $sessionParams = @{
-            ComputerName = $Config.Host
-            Port         = $Config.SshPort
-            Credential   = $credential
-            ErrorAction  = 'Stop'
-        }
-        if ($Config.KeepAlive) {
-            $sessionParams['KeepAliveInterval'] = 30 # Posh-SSH KeepAlive is in seconds
-        }
+            if ($Config.BackgroundLogging) {
+                $logger = Start-SessionLogger -LogFilePath $Config.LogFilePath -RawSessionData:$Config.RawLogData -ObfuscatePasswords:$Config.ObfuscatePasswords
+            }
 
-        $poshSession = New-SSHSession @sessionParams
-        $client = ($poshSession | Select-Object -First 1).Session
-        if (-not $client.IsConnected) { throw "Failed to establish an SSH connection." }
-
-        $termWidth = if ($Host.UI.RawUI.WindowSize.Width -gt 0) { $Host.UI.RawUI.WindowSize.Width } else { 80 }
-        $termHeight = if ($Host.UI.RawUI.WindowSize.Height -gt 0) { $Host.UI.RawUI.WindowSize.Height } else { 24 }
-        $shellStream = $client.CreateShellStream("xterm-256color", $termWidth, $termHeight, 0, 0, 4096)
+            $termWidth = if ($Host.UI.RawUI.WindowSize.Width -gt 0) { $Host.UI.RawUI.WindowSize.Width } else { 80 }
+            $termHeight = if ($Host.UI.RawUI.WindowSize.Height -gt 0) { $Host.UI.RawUI.WindowSize.Height } else { 24 }
+            $shellStream = $client.CreateShellStream("xterm-256color", $termWidth, $termHeight, 0, 0, 4096)
 
         # --- Echo Detection ---
         $logUserInput = $true # Default to true (no echo)
@@ -640,9 +750,10 @@ function Start-SshSession {
         }
     }
     catch {
-        Write-Error "SSH session failed: $($_.Exception.Message)"
-        if ($_.Exception.InnerException) { Write-Error "Inner Exception: $($_.Exception.InnerException.Message)" }
-        Read-Host "Press Enter to continue..."
+        if (-not $autoRetry) {
+             Write-Error "SSH session failed: $($_.Exception.Message)"
+             if ($_.Exception.InnerException) { Write-Error "Inner Exception: $($_.Exception.InnerException.Message)" }
+        }
     }
     finally {
         Write-Host "`n--- SSH Session Closed. ---" -ForegroundColor Yellow
@@ -651,6 +762,14 @@ function Start-SshSession {
         if ($poshSession) { Remove-SSHSession -SSHSession $poshSession }
         [Console]::TreatControlCAsInput = $false
     }
+
+    # Session Ended Menu
+    $action = Show-SessionEndedMenu
+    if ($action -eq 'E') { return }
+    if ($action -eq 'R') { $autoRetry = $false }
+    if ($action -eq 'A') { $autoRetry = $true }
+
+    } while ($true)
 }
 
 function Start-TelnetSession {
@@ -658,31 +777,52 @@ function Start-TelnetSession {
         [PSCustomObject]$Config
     )
 
-    $client = New-Object System.Net.Sockets.TcpClient
-    $stream = $null
-    $logger = $null
-    $keepAliveJob = $null
-    $readerJob = $null
+    $autoRetry = $false
 
-    try {
-        # Apply terminal colors if forced
-        if ($Config.ForceTerminalColors) {
-            $Host.UI.RawUI.ForegroundColor = $Config.TextColor
-            $Host.UI.RawUI.BackgroundColor = $Config.BackgroundColor
-            Clear-Host
-        }
+    do {
+        $client = New-Object System.Net.Sockets.TcpClient
+        $stream = $null
+        $logger = $null
+        $keepAliveJob = $null
+        $readerJob = $null
 
-		$host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
+        try {
+            # Apply terminal colors if forced, else reset
+            if ($Config.ForceTerminalColors) {
+                $Host.UI.RawUI.ForegroundColor = $Config.TextColor
+                $Host.UI.RawUI.BackgroundColor = $Config.BackgroundColor
+                Clear-Host
+            } else {
+                [Console]::ResetColor()
+                Clear-Host
+            }
 
-        if ($Config.BackgroundLogging) {
-            $logger = Start-SessionLogger -LogFilePath $Config.LogFilePath -RawSessionData:$Config.RawLogData -ObfuscatePasswords:$Config.ObfuscatePasswords
-        }
+            $host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
 
-        Write-Host "Connecting to $($Config.Host) on port $($Config.TelnetPort)..." -ForegroundColor Cyan
-        $client.Connect($Config.Host, $Config.TelnetPort)
-        $stream = $client.GetStream()
+            while ($true) {
+                try {
+                    Write-Host "Connecting to $($Config.Host) on port $($Config.TelnetPort)..." -ForegroundColor Cyan
+                    $client.Connect($Config.Host, $Config.TelnetPort)
+                    $stream = $client.GetStream()
+                    break # Connected
+                }
+                catch {
+                    if ($autoRetry) {
+                        Write-Host "Connection failed. Retrying in 3 seconds... (Press Ctrl+C to cancel)" -ForegroundColor Yellow
+                        Start-Sleep -Seconds 3
+                        # Re-create TcpClient for next attempt
+                        $client = New-Object System.Net.Sockets.TcpClient
+                    } else {
+                        throw $_
+                    }
+                }
+            }
 
-        # Start a background job to read from the stream
+            if ($Config.BackgroundLogging) {
+                $logger = Start-SessionLogger -LogFilePath $Config.LogFilePath -RawSessionData:$Config.RawLogData -ObfuscatePasswords:$Config.ObfuscatePasswords
+            }
+
+            # Start a background job to read from the stream
         $readerJob = Start-Job -InitializationScript ${function:Remove-AnsiEscapeSequences} -ScriptBlock {
             param($streamRef, $logQueueRef, $rawLogData)
             $stream = $streamRef.get_Value()
@@ -746,33 +886,43 @@ function Start-TelnetSession {
             $keepAliveJob = Start-SessionKeepAlive -Stream $stream
         }
 
-        while ($client.Connected -and $readerJob.State -in @('Running', 'NotStarted')) {
-            if ([Console]::KeyAvailable) {
-                $key = [Console]::ReadKey($true)
-                if ($key.Key -eq 'Escape') { break }
+            while ($client.Connected -and $readerJob.State -in @('Running', 'NotStarted')) {
+                if ([Console]::KeyAvailable) {
+                    $key = [Console]::ReadKey($true)
+                    if ($key.Key -eq 'Escape') { break }
 
-                $output = if ($inputHelpers.ContainsKey($key.Key)) { $inputHelpers[$key.Key] } else { $key.KeyChar }
-                $bytes = [System.Text.Encoding]::ASCII.GetBytes($output)
-                $stream.Write($bytes, 0, $bytes.Length)
+                    $output = if ($inputHelpers.ContainsKey($key.Key)) { $inputHelpers[$key.Key] } else { $key.KeyChar }
+                    $bytes = [System.Text.Encoding]::ASCII.GetBytes($output)
+                    $stream.Write($bytes, 0, $bytes.Length)
 
-                if ($logger) {
-                    $dataToLog = if ($Config.RawLogData) { $output } else { Remove-AnsiEscapeSequences $output }
-                    $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = $dataToLog })
+                    if ($logger) {
+                        $dataToLog = if ($Config.RawLogData) { $output } else { Remove-AnsiEscapeSequences $output }
+                        $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = $dataToLog })
+                    }
                 }
+                Start-Sleep -Milliseconds 20
             }
-            Start-Sleep -Milliseconds 20
         }
-    }
-    catch { Write-Error "Telnet session failed: $_" }
-    finally {
-        Write-Host "`n--- Telnet Session Closed. ---" -ForegroundColor Yellow
-        if ($keepAliveJob) { Stop-SessionKeepAlive $keepAliveJob }
-        if ($readerJob) { Stop-Job $readerJob | Remove-Job -Force }
-        if ($logger) { Stop-SessionLogger $logger }
-        if ($stream) { $stream.Close() }
-        if ($client) { $client.Close() }
-        [Console]::TreatControlCAsInput = $false
-    }
+        catch {
+             if (-not $autoRetry) { Write-Error "Telnet session failed: $_" }
+        }
+        finally {
+            Write-Host "`n--- Telnet Session Closed. ---" -ForegroundColor Yellow
+            if ($keepAliveJob) { Stop-SessionKeepAlive $keepAliveJob }
+            if ($readerJob) { Stop-Job $readerJob | Remove-Job -Force }
+            if ($logger) { Stop-SessionLogger $logger }
+            if ($stream) { $stream.Close() }
+            if ($client) { $client.Close() }
+            [Console]::TreatControlCAsInput = $false
+        }
+        
+        # Session Ended Menu
+        $action = Show-SessionEndedMenu
+        if ($action -eq 'E') { return }
+        if ($action -eq 'R') { $autoRetry = $false }
+        if ($action -eq 'A') { $autoRetry = $true }
+
+    } while ($true)
 }
 
 
@@ -792,7 +942,7 @@ while ($true) {
         $dialogResult = Show-ConnectionConfigMenu
     }
 
-    if (($WpfAvailable -and $dialogResult -ne 'OK') -or (!$WpfAvailable -and $dialogResult -ne [Windows.Forms.DialogResult]::OK) -or !$global:ConnectionConfig) {
+    if (!$global:ConnectionConfig) {
         Write-Host "Operation cancelled. Exiting." -ForegroundColor Yellow
         break
     }
@@ -811,13 +961,7 @@ while ($true) {
     try {
         switch ($config.Type) {
             "Serial" {
-                if ([string]::IsNullOrWhiteSpace($config.COMPort)) { throw "No COM Port selected." }
-                $port = New-Object System.IO.Ports.SerialPort($config.COMPort, $config.BaudRate, $config.Parity, $config.DataBits, $config.StopBits)
-                $port.Handshake = $config.Handshake
-                $port.DtrEnable = $config.DtrEnable
-                $port.Open()
-                Start-SerialSession -Port $port -Config $config
-                $port.Close()
+                Start-SerialSession -Config $config
             }
             "SSH" {
                 Start-SshSession -Config $config

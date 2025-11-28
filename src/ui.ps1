@@ -359,11 +359,162 @@ function Show-ConnectionConfigMenu_WPF {
     [ConsoleUtils]::ShowWindow($consoleHandle, 0) # Hide console
 
     try {
+        $brushConverter = New-Object System.Windows.Media.BrushConverter
+
+        $GetThemeColors = {
+            param($dark)
+            if ($dark) {
+                return @{
+                    WindowBackground = "#202020"
+                    ControlBackground = "#2D2D2D"
+                    TextColor = "#FFFFFF"
+                    BorderColor = "#404040"
+                    AccentColor = "#4CA3DD"
+                    ControlHover = "#3A3A3A"
+                    ToggleOff = "#505050"
+                    ToggleDot = "#FFFFFF"
+                }
+            } else {
+                return @{
+                    WindowBackground = "#F3F3F3"
+                    ControlBackground = "#FFFFFF"
+                    TextColor = "#000000"
+                    BorderColor = "#D0D0D0"
+                    AccentColor = "#0078D4"
+                    ControlHover = "#E0E0E0"
+                    ToggleOff = "#808080"
+                    ToggleDot = "#FFFFFF"
+                }
+            }
+        }
+
+        $DetectTheme = {
+            $isDark = $true
+            try {
+                $regKey = "HKCU:\Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"
+                if (Test-Path $regKey) {
+                    $val = Get-ItemProperty -Path $regKey -Name "AppsUseLightTheme" -ErrorAction SilentlyContinue
+                    if ($val -and $val.AppsUseLightTheme -eq 1) { $isDark = $false }
+                }
+            } catch { }
+            return $isDark
+        }
+
         # Load XAML
         $xamlPath = Join-Path $ScriptBaseDir "ConnectionConfig.xaml"
         $xaml = [xml](Get-Content $xamlPath -Raw)
         $reader = New-Object System.Xml.XmlNodeReader($xaml)
         $window = [Windows.Markup.XamlReader]::Load($reader)
+
+        # Initial Theme Apply
+        $isDarkTheme = & $DetectTheme
+        $colors = & $GetThemeColors $isDarkTheme
+        foreach ($key in $colors.Keys) {
+            try {
+                $colorVal = $colors[$key]
+                if (-not [string]::IsNullOrWhiteSpace($colorVal)) {
+                    $brush = $brushConverter.ConvertFromString($colorVal.Trim())
+                    if ($brush) { $window.Resources.Add($key, $brush) }
+                }
+            } catch { Write-Warning "Theme Error ($key): $_" }
+        }
+
+        # --- Live Theme Update Handler ---
+        $themeChangedHandler = {
+            param($sender, $e)
+            if ($e.Category -eq 'General' -or $e.Category -eq 'Color') {
+                $window.Dispatcher.Invoke({
+                    $newIsDark = & $DetectTheme
+                    $newColors = & $GetThemeColors $newIsDark
+                    foreach ($k in $newColors.Keys) {
+                        try {
+                            $colorVal = $newColors[$k]
+                            if (-not [string]::IsNullOrWhiteSpace($colorVal)) {
+                                $b = $brushConverter.ConvertFromString($colorVal.Trim())
+                                if ($b) {
+                                    if ($window.Resources.Contains($k)) { $window.Resources[$k] = $b } 
+                                    else { $window.Resources.Add($k, $b) }
+                                }
+                            }
+                        } catch {}
+                    }
+                    # Update Title Bar
+                    $ih = New-Object System.Windows.Interop.WindowInteropHelper($window)
+                    $h = $ih.Handle
+                    $dm = if ($newIsDark) { 1 } else { 0 }
+                    [DwmUtils]::DwmSetWindowAttribute($h, 20, [ref]$dm, 4) | Out-Null
+                })
+            }
+        }
+        [Microsoft.Win32.SystemEvents]::add_UserPreferenceChanged($themeChangedHandler)
+        $window.add_Closed({ [Microsoft.Win32.SystemEvents]::remove_UserPreferenceChanged($themeChangedHandler) })
+
+        # --- Helper: Themed MessageBox ---
+        $ShowMessageBox = {
+            param($Title, $Message, $Button = "OK")
+            
+            $msgWindow = New-Object Windows.Window
+            $msgWindow.Title = $Title
+            $msgWindow.SizeToContent = 'WidthAndHeight'
+            $msgWindow.WindowStartupLocation = 'CenterOwner'
+            $msgWindow.Owner = $window
+            $msgWindow.ResizeMode = 'NoResize'
+            $msgWindow.Background = $window.Resources["WindowBackground"]
+            $msgWindow.Foreground = $window.Resources["TextColor"]
+            $msgWindow.FontFamily = $window.FontFamily
+            $msgWindow.FontSize = 14
+            
+            # Copy resources (Styles)
+            foreach ($key in $window.Resources.Keys) {
+                if (-not $msgWindow.Resources.Contains($key)) {
+                    $msgWindow.Resources.Add($key, $window.Resources[$key])
+                }
+            }
+
+            $grid = New-Object Windows.Controls.Grid; $grid.Margin = 20
+            $grid.RowDefinitions.Add((New-Object Windows.Controls.RowDefinition -Property @{Height='Auto'}))
+            $grid.RowDefinitions.Add((New-Object Windows.Controls.RowDefinition -Property @{Height='Auto'}))
+            $msgWindow.Content = $grid
+            
+            $txt = New-Object Windows.Controls.TextBlock
+            $txt.Text = $Message
+            $txt.Margin = "0,0,0,20"
+            $txt.TextWrapping = 'Wrap'
+            $txt.MaxWidth = 350
+            $grid.Children.Add($txt); [Windows.Controls.Grid]::SetRow($txt, 0)
+            
+            $stack = New-Object Windows.Controls.StackPanel
+            $stack.Orientation = 'Horizontal'
+            $stack.HorizontalAlignment = 'Right'
+            $grid.Children.Add($stack); [Windows.Controls.Grid]::SetRow($stack, 1)
+
+            # Return state object to handle variable scoping in closures
+            $state = @{ Result = 'Cancel' }
+
+            if ($Button -eq 'YesNo') {
+                 $btnYes = New-Object Windows.Controls.Button; $btnYes.Content = "Yes"; $btnYes.MinWidth=80; $btnYes.Margin="5"; $btnYes.IsDefault=$true
+                 $btnYes.add_Click({ $state.Result = 'Yes'; $msgWindow.Close() })
+                 $btnNo = New-Object Windows.Controls.Button; $btnNo.Content = "No"; $btnNo.MinWidth=80; $btnNo.Margin="5"; $btnNo.IsCancel=$true
+                 $btnNo.add_Click({ $state.Result = 'No'; $msgWindow.Close() })
+                 $stack.Children.Add($btnYes); $stack.Children.Add($btnNo)
+            } else {
+                 $btnOk = New-Object Windows.Controls.Button; $btnOk.Content = "OK"; $btnOk.MinWidth=80; $btnOk.Margin="5"; $btnOk.IsDefault=$true
+                 $btnOk.add_Click({ $state.Result = 'OK'; $msgWindow.Close() })
+                 $stack.Children.Add($btnOk)
+            }
+            
+            # Apply Dark Mode Title Bar
+            if ($isDarkTheme) {
+                $interopHelper = New-Object System.Windows.Interop.WindowInteropHelper($msgWindow)
+                $interopHelper.EnsureHandle()
+                $h = $interopHelper.Handle
+                $d = 1
+                [DwmUtils]::DwmSetWindowAttribute($h, 20, [ref]$d, 4) | Out-Null
+            }
+
+            $msgWindow.ShowDialog() | Out-Null
+            return $state.Result
+        }
 
         # Set icon
         $window.TaskbarItemInfo = New-Object System.Windows.Shell.TaskbarItemInfo
@@ -371,7 +522,8 @@ function Show-ConnectionConfigMenu_WPF {
         $window.Icon = [System.Windows.Media.Imaging.BitmapFrame]::Create([System.Uri](Join-Path $ScriptBaseDir "icon.ico"))
         # Find controls
         $controls = @{}
-        $window.FindName("cbProfiles") | ForEach-Object { $controls.cbProfiles = $_ }
+        $window.FindName("cbLoadProfile") | ForEach-Object { $controls.cbLoadProfile = $_ }
+        $window.FindName("txtNewProfileName") | ForEach-Object { $controls.txtNewProfileName = $_ }
         $window.FindName("btnSaveProfile") | ForEach-Object { $controls.btnSaveProfile = $_ }
         $window.FindName("btnDeleteProfile") | ForEach-Object { $controls.btnDeleteProfile = $_ }
         $window.FindName("rbSerial") | ForEach-Object { $controls.rbSerial = $_ }
@@ -409,7 +561,7 @@ function Show-ConnectionConfigMenu_WPF {
         $window.FindName("btnAbout") | ForEach-Object { $controls.btnAbout = $_ }
 
         # --- Populate Controls ---
-        $controls.cbProfiles.ItemsSource = Get-ProfileList
+        $controls.cbLoadProfile.ItemsSource = Get-ProfileList
         $controls.cbBaud.ItemsSource = @(9600, 19200, 38400, 57600, 115200)
         $controls.cbDataBits.ItemsSource = @(8, 7)
         $controls.cbParity.ItemsSource = [enum]::GetNames([System.IO.Ports.Parity])
@@ -463,20 +615,15 @@ function Show-ConnectionConfigMenu_WPF {
         $LoadProfileIntoForm = {
             param($profile)
             if (!$profile) { return }
+            $controls.txtNewProfileName.Text = $profile.Name
             switch ($profile.Type) {
                 "Serial" { $controls.rbSerial.IsChecked = $true }
                 "SSH"    { $controls.rbSsh.IsChecked = $true }
                 "Telnet" { $controls.rbTelnet.IsChecked = $true }
             }
-            #$controls.cbPort.SelectedItem = $profile.COMPort
-                    # --- Updated Profile Logic ---
-            # Safely set the saved port from the profile *only if it exists* in the new list.
             if ($controls.cbPort.ItemsSource -contains $profile.COMPort) {
                 $controls.cbPort.SelectedItem = $profile.COMPort
-            } 
-            # If the saved port is invalid AND the list is empty,
-            # make sure the "None" placeholder is still visible.
-            elseif ($controls.cbPort.ItemsSource.Count -eq 0) {
+            } elseif ($controls.cbPort.ItemsSource.Count -eq 0) {
                 $controls.cbPort.SelectedItem = $null
                 $controls.cbPort.Text = "None"
             }
@@ -503,15 +650,15 @@ function Show-ConnectionConfigMenu_WPF {
             $controls.chkObfuscate.IsChecked = $profile.ObfuscatePasswords
         }
 
-        $controls.cbProfiles.add_SelectionChanged({
+        $controls.cbLoadProfile.add_SelectionChanged({
             if ($_.AddedItems.Count -gt 0) {
                 $LoadProfileIntoForm.Invoke((Import-Profile $_.AddedItems[0]))
             }
         })
 
         $controls.btnSaveProfile.add_Click({
-            $profileName = $controls.cbProfiles.Text
-            if ([string]::IsNullOrWhiteSpace($profileName)) { [Windows.MessageBox]::Show("Please enter a profile name.", "Error", "OK", "Error"); return }
+            $profileName = $controls.txtNewProfileName.Text
+            if ([string]::IsNullOrWhiteSpace($profileName)) { $ShowMessageBox.Invoke("Error", "Please enter a profile name."); return }
             $config = [PSCustomObject]@{
                 Name = $profileName; Type = if ($controls.rbSerial.IsChecked) { "Serial" } elseif ($controls.rbSsh.IsChecked) { "SSH" } else { "Telnet" }
                 COMPort = $controls.cbPort.Text; BaudRate = $controls.cbBaud.Text; DataBits = $controls.cbDataBits.Text; Parity = $controls.cbParity.Text; StopBits = $controls.cbStopBits.Text; Handshake = $controls.cbHandshake.Text; DtrEnable = $controls.chkDtrEnable.IsChecked
@@ -522,24 +669,21 @@ function Show-ConnectionConfigMenu_WPF {
                 BackgroundLogging = $controls.chkBackgroundLogging.IsChecked; LogFilePath = $controls.txtLogFilePath.Text; RawLogData = $controls.chkRawLogData.IsChecked; ObfuscatePasswords = $controls.chkObfuscate.IsChecked
             }
             Save-Profile $profileName $config
-            [Windows.MessageBox]::Show("Profile '$profileName' saved.", "Success", "OK", "Information")
-            $controls.cbProfiles.ItemsSource = Get-ProfileList
-            $controls.cbProfiles.Text = $profileName
+            $ShowMessageBox.Invoke("Success", "Profile '$profileName' saved.")
+            $controls.cbLoadProfile.ItemsSource = Get-ProfileList
+            $controls.cbLoadProfile.SelectedItem = $profileName
         })
 
         $controls.btnDeleteProfile.add_Click({
-            $profileName = $controls.cbProfiles.Text
-            if ([string]::IsNullOrWhiteSpace($profileName)) { [Windows.MessageBox]::Show("Please select a profile to delete.", "Error", "OK", "Error"); return }
-            $confirm = [Windows.MessageBox]::Show("Are you sure you want to delete profile '$profileName'?", "Confirm Delete", 'YesNo', 'Question')
+            $profileName = $controls.cbLoadProfile.SelectedItem
+            if ([string]::IsNullOrWhiteSpace($profileName)) { $ShowMessageBox.Invoke("Error", "Please select a profile to delete from the list."); return }
+            $confirm = $ShowMessageBox.Invoke("Confirm Delete", "Are you sure you want to delete profile '$profileName'?", 'YesNo')
             if ($confirm -eq 'Yes') {
-                if ($ProfilesFile -and (Test-Path $ProfilesFile)) {
-                    $profiles = @(Get-Content -Raw -Path $ProfilesFile | ConvertFrom-Json)
-                    $profiles = $profiles | Where-Object { $_.Name -ne $profileName }
-                    $profiles | ConvertTo-Json -Depth 5 | Set-Content -Path $ProfilesFile -Encoding UTF8
-                }
-                $controls.cbProfiles.ItemsSource = Get-ProfileList
-                $controls.cbProfiles.Text = ""
-                [Windows.MessageBox]::Show("Profile '$profileName' deleted.", "Success", "OK", "Information")
+                Remove-Profile $profileName
+                $controls.cbLoadProfile.ItemsSource = Get-ProfileList
+                $controls.cbLoadProfile.SelectedItem = $null
+                $controls.txtNewProfileName.Text = ""
+                $ShowMessageBox.Invoke("Success", "Profile '$profileName' deleted.")
             }
         })
 
@@ -548,22 +692,39 @@ function Show-ConnectionConfigMenu_WPF {
             if ($sfd.ShowDialog() -eq $true) { $controls.txtLogFilePath.Text = $sfd.FileName }
         })
 
-        $controls.btnConnect.add_Click({ $window.DialogResult = $true; $window.Close() })
-        $controls.btnCancel.add_Click({ $window.DialogResult = $false; $window.Close() })
+        # Use closure state for dialog result to avoid nullable bool issues
+        $configState = @{ Result = 'Cancel' }
+
+        $controls.btnConnect.add_Click({ $configState.Result = 'OK'; $window.Close() })
+        $controls.btnCancel.add_Click({ $configState.Result = 'Cancel'; $window.Close() })
         $controls.btnAbout.add_Click({
             $aboutWindow = New-Object Windows.Window
             $aboutWindow.Title = "About PSTerm"
             $aboutWindow.Width = 400
-            $aboutWindow.Height = 300
+            $aboutWindow.Height = 320
             $aboutWindow.WindowStartupLocation = "CenterOwner"
             $aboutWindow.Owner = $window
+            $aboutWindow.ResizeMode = 'NoResize'
+            $aboutWindow.Background = $window.Resources["WindowBackground"]
+            $aboutWindow.Foreground = $window.Resources["TextColor"]
+            $aboutWindow.FontFamily = $window.FontFamily
+            $aboutWindow.FontSize = 14
+
+            # Inject Resources into About Window
+            foreach ($key in $window.Resources.Keys) {
+                if (-not $aboutWindow.Resources.Contains($key)) {
+                    $aboutWindow.Resources.Add($key, $window.Resources[$key])
+                }
+            }
 
             $stackPanel = New-Object Windows.Controls.StackPanel
+            $stackPanel.Margin = 10
             $aboutWindow.Content = $stackPanel
 
             $copyright = New-Object Windows.Controls.TextBlock
             $copyright.Text = "PSTerm - A powerful native PowerShell Serial/SSH/Telnet Terminal.`nCopyright (C) 2025 Marlo K <Plays.xenon@yahoo.de>"
             $copyright.Margin = "10"
+            $copyright.TextWrapping = "Wrap"
             $stackPanel.Children.Add($copyright)
 
             $license = New-Object Windows.Controls.TextBlock
@@ -574,38 +735,62 @@ function Show-ConnectionConfigMenu_WPF {
             $license2 = New-Object Windows.Controls.TextBlock
             $license2.Text = "This is free software, and you are welcome to redistribute it`nunder certain conditions. See the LICENSE file for details."
             $license2.Margin = "10"
+            $license2.TextWrapping = "Wrap"
             $stackPanel.Children.Add($license2)
 
             $okButton = New-Object Windows.Controls.Button
             $okButton.Content = "OK"
-            $okButton.Width = 80
+            $okButton.Width = 100
             $okButton.Margin = "10"
             $okButton.HorizontalAlignment = "Center"
+            $okButton.Padding = "10,5"
             $okButton.add_Click({ $aboutWindow.Close() })
             $stackPanel.Children.Add($okButton)
+
+            # Apply Dark Mode Title Bar
+            if ($isDarkTheme) {
+                $interopHelper = New-Object System.Windows.Interop.WindowInteropHelper($aboutWindow)
+                $interopHelper.EnsureHandle()
+                $h = $interopHelper.Handle
+                $d = 1
+                [DwmUtils]::DwmSetWindowAttribute($h, 20, [ref]$d, 4) | Out-Null
+            }
 
             $aboutWindow.ShowDialog() | Out-Null
         })
 
         # Initial load
-        $LoadProfileIntoForm.Invoke((Import-Profile "Default-Serial")); $controls.cbProfiles.SelectedItem = "Default-Serial"
+        $LoadProfileIntoForm.Invoke((Import-Profile "Default-Serial")); $controls.cbLoadProfile.SelectedItem = "Default-Serial"
         $UpdateFormForType.Invoke()
 
-        $result = $window.ShowDialog()
+        # Set Dark Mode Title Bar for Main Window
+        if ($isDarkTheme) {
+            $interopHelper = New-Object System.Windows.Interop.WindowInteropHelper($window)
+            $interopHelper.EnsureHandle()
+            $handle = $interopHelper.Handle
+            $darkMode = 1
+            [DwmUtils]::DwmSetWindowAttribute($handle, 20, [ref]$darkMode, 4) | Out-Null
+        }
 
-        if ($result -eq $true) {
-            [int]$sshPort = 22; [int]::TryParse($controls.txtSshPort.Text, [ref]$sshPort) | Out-Null
-            [int]$telnetPort = 23; [int]::TryParse($controls.txtTelnetPort.Text, [ref]$telnetPort) | Out-Null
-            $global:ConnectionConfig = [PSCustomObject]@{
-                Name = $controls.cbProfiles.Text; Type = if ($controls.rbSerial.IsChecked) { "Serial" } elseif ($controls.rbSsh.IsChecked) { "SSH" } else { "Telnet" }
-                COMPort = $controls.cbPort.Text; BaudRate = [int]$controls.cbBaud.Text; DataBits = [int]$controls.cbDataBits.Text; Parity = $controls.cbParity.Text; StopBits = $controls.cbStopBits.Text; Handshake = $controls.cbHandshake.Text; DtrEnable = $controls.chkDtrEnable.IsChecked
-                Host = if ($controls.rbSsh.IsChecked) { $controls.txtSshHost.Text } elseif ($controls.rbTelnet.IsChecked) { $controls.txtTelnetHost.Text } else { "" }; User = $controls.txtSshUser.Text; SshPort = $sshPort; TelnetPort = $telnetPort
-                TextColor = $controls.cbTextColor.Text; BackgroundColor = $controls.cbBgColor.Text; CursorSize = $controls.cbCursorSize.Text
-                ForceTerminalColors = $controls.chkForceColors.IsChecked; KeepAlive = $controls.chkKeepAlive.IsChecked
-                AutoInput = $controls.txtAutoInput.Text.Replace("`r`n", "`n"); BackgroundLogging = $controls.chkBackgroundLogging.IsChecked
-                LogFilePath = $controls.txtLogFilePath.Text; RawLogData = $controls.chkRawLogData.IsChecked; ObfuscatePasswords = $controls.chkObfuscate.IsChecked
+        $window.ShowDialog() | Out-Null
+
+        if ($configState.Result -eq 'OK') {
+            try {
+                [int]$sshPort = 22; [int]::TryParse($controls.txtSshPort.Text, [ref]$sshPort) | Out-Null
+                [int]$telnetPort = 23; [int]::TryParse($controls.txtTelnetPort.Text, [ref]$telnetPort) | Out-Null
+                $global:ConnectionConfig = [PSCustomObject]@{
+                    Name = $controls.cbLoadProfile.SelectedItem; Type = if ($controls.rbSerial.IsChecked) { "Serial" } elseif ($controls.rbSsh.IsChecked) { "SSH" } else { "Telnet" }
+                    COMPort = $controls.cbPort.Text; BaudRate = [int]$controls.cbBaud.SelectedItem; DataBits = [int]$controls.cbDataBits.SelectedItem; Parity = $controls.cbParity.SelectedItem; StopBits = $controls.cbStopBits.SelectedItem; Handshake = $controls.cbHandshake.SelectedItem; DtrEnable = $controls.chkDtrEnable.IsChecked
+                    Host = if ($controls.rbSsh.IsChecked) { $controls.txtSshHost.Text } elseif ($controls.rbTelnet.IsChecked) { $controls.txtTelnetHost.Text } else { "" }; User = $controls.txtSshUser.Text; SshPort = $sshPort; TelnetPort = $telnetPort
+                    TextColor = $controls.cbTextColor.SelectedItem; BackgroundColor = $controls.cbBgColor.SelectedItem; CursorSize = $controls.cbCursorSize.SelectedItem
+                    ForceTerminalColors = $controls.chkForceColors.IsChecked; KeepAlive = $controls.chkKeepAlive.IsChecked
+                    AutoInput = $controls.txtAutoInput.Text.Replace("`r`n", "`n"); BackgroundLogging = $controls.chkBackgroundLogging.IsChecked
+                    LogFilePath = $controls.txtLogFilePath.Text; RawLogData = $controls.chkRawLogData.IsChecked; ObfuscatePasswords = $controls.chkObfuscate.IsChecked
+                }
+                return 'OK'
+            } catch {
+                $ShowMessageBox.Invoke("Error", "Failed to create connection configuration: $_")
             }
-            return 'OK'
         }
         return 'Cancel'
     }
