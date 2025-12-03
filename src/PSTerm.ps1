@@ -300,8 +300,9 @@ function Remove-AnsiEscapeSequences {
     $ansiPattern = '\x1B\[[0-9;?]*[@-~]'
     $cleanedText = $textinput -replace $ansiPattern, ''
 
-    # Pattern to match other non-printable control characters, preserving CR, LF, and Tab
-    $controlCharPattern = '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'
+    # Pattern to match other non-printable control characters, preserving CR, LF, Tab, and Backspace (for log processing)
+    # Changed \x00-\x08 to \x00-\x07 so \x08 (BS) is preserved.
+    $controlCharPattern = '[\x00-\x07\x0B\x0C\x0E-\x1F\x7F]'
     $cleanedText = $cleanedText -replace $controlCharPattern, ''
 
     return $cleanedText
@@ -335,50 +336,93 @@ function Start-SessionLogger {
 
     # Define the logger scriptblock to run in a background runspace
     $loggerScript = {
-        param($path, $queue, $stopRef, $obfuscate)
+        param($path, $queue, $stopRef, $obfuscate, $raw)
 
         $passwordPromptDetected = $false
         $passwordPromptRegex = 'password:|passphrase for|enter password'
+        $lineBuffer = New-Object System.Text.StringBuilder
+        
+        $streamWriter = [System.IO.StreamWriter]::new($path, $true, [System.Text.Encoding]::UTF8)
+        $streamWriter.AutoFlush = $true
 
-        while (-not $stopRef.Value) {
-            while ($queue.Count -gt 0) {
-                $logEntry = $queue.Dequeue()
-                if ($null -eq $logEntry) { continue }
+        $ProcessAndWrite = {
+            param($text)
+            
+            # If Raw mode, dump directly
+            if ($raw) {
+                $streamWriter.Write($text)
+                return
+            }
 
-                $dataToLog = $logEntry.Data
-
-                if ($obfuscate) {
-                    if ($logEntry.Source -eq 'Server') {
-                        if ($dataToLog -match $passwordPromptRegex) {
-                            $passwordPromptDetected = $true
-                        }
-                        Add-Content -Path $path -Value $dataToLog -NoNewline -Encoding UTF8
-                    }
-                    elseif ($logEntry.Source -eq 'User') {
-                        if ($passwordPromptDetected) {
-                            $obfuscatedData = '*' * $dataToLog.Length
-                            Add-Content -Path $path -Value $obfuscatedData -NoNewline -Encoding UTF8
-                            # Reset after user hits enter
-                            if ($dataToLog -match "[\r\n]") {
-                                $passwordPromptDetected = $false
-                            }
-                        }
-                        else {
-                            Add-Content -Path $path -Value $dataToLog -NoNewline -Encoding UTF8
-                        }
-                    }
+            # If Obfuscation is on, we are dealing with a modified string (potentially).
+            # We treat the text as linear stream.
+            
+            $chars = $text.ToCharArray()
+            foreach ($c in $chars) {
+                # Handle Backspace (0x08)
+                if ($c -eq [char]8) {
+                    if ($lineBuffer.Length -gt 0) { $lineBuffer.Length-- }
+                }
+                # Handle Newlines (Flush on LF only to keep CRLF atomic)
+                elseif ($c -eq "`n") {
+                    $lineBuffer.Append($c)
+                    $streamWriter.Write($lineBuffer.ToString())
+                    $lineBuffer.Clear()
                 }
                 else {
-                    Add-Content -Path $path -Value $dataToLog -NoNewline -Encoding UTF8
+                    $lineBuffer.Append($c)
                 }
             }
-            Start-Sleep -Milliseconds 100
+        }
+
+        try {
+            while (-not $stopRef.Value) {
+                while ($queue.Count -gt 0) {
+                    $logEntry = $queue.Dequeue()
+                    if ($null -eq $logEntry) { continue }
+
+                    $dataToLog = $logEntry.Data
+
+                    if ($obfuscate) {
+                        if ($logEntry.Source -eq 'Server') {
+                            if ($dataToLog -match $passwordPromptRegex) {
+                                $passwordPromptDetected = $true
+                            }
+                            $ProcessAndWrite.Invoke($dataToLog)
+                        }
+                        elseif ($logEntry.Source -eq 'User') {
+                            if ($passwordPromptDetected) {
+                                $obfuscatedData = '*' * $dataToLog.Length
+                                $ProcessAndWrite.Invoke($obfuscatedData)
+                                # Reset after user hits enter
+                                if ($dataToLog -match "[\r\n]") {
+                                    $passwordPromptDetected = $false
+                                }
+                            }
+                            else {
+                                $ProcessAndWrite.Invoke($dataToLog)
+                            }
+                        }
+                    }
+                    else {
+                        $ProcessAndWrite.Invoke($dataToLog)
+                    }
+                }
+                Start-Sleep -Milliseconds 100
+            }
+        }
+        finally {
+            # Flush remaining buffer on exit
+            if ($null -ne $lineBuffer -and $lineBuffer.Length -gt 0) {
+                $streamWriter.Write($lineBuffer.ToString())
+            }
+            $streamWriter.Dispose()
         }
     }
 
     # Create and start the runspace
     $runspace = [powershell]::Create()
-    $runspace.AddScript($loggerScript).AddArgument($LogFilePath).AddArgument($logQueue).AddArgument($stopFlag).AddArgument($ObfuscatePasswords.IsPresent) | Out-Null
+    $runspace.AddScript($loggerScript).AddArgument($LogFilePath).AddArgument($logQueue).AddArgument($stopFlag).AddArgument($ObfuscatePasswords.IsPresent).AddArgument($RawSessionData.IsPresent) | Out-Null
     $runspace.Runspace.ThreadOptions = "ReuseThread"
     $asyncResult = $runspace.BeginInvoke()
 
@@ -525,7 +569,8 @@ function Start-SerialSession {
                         if ($cfg.RawLogData) {
                             $dataToLog = $data
                         } else {
-                            $dataToLog = $data -replace '\x1B\[[0-9;?]*[@-~]', '' -replace '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]', ''
+                            # Preserve \x08 (BS) for logger processing
+                            $dataToLog = $data -replace '\x1B\[[0-9;?]*[@-~]', '' -replace '[\x00-\x07\x0B\x0C\x0E-\x1F\x7F]', ''
                         }
                         $log.Queue.Enqueue([PSCustomObject]@{Source = 'Server'; Data = $dataToLog })
                     }
@@ -860,7 +905,8 @@ function Start-TelnetSession {
                 if (-not $textinput) { return '' }
                 $ansiPattern = '\x1B\[[0-9;?]*[@-~]'
                 $cleanedText = $textinput -replace $ansiPattern, ''
-                $controlCharPattern = '[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]'
+                # Preserve \x08 (BS) for logger processing
+                $controlCharPattern = '[\x00-\x07\x0B\x0C\x0E-\x1F\x7F]'
                 $cleanedText -replace $controlCharPattern, ''
             }
         } -ScriptBlock {
