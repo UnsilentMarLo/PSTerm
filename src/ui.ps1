@@ -778,6 +778,31 @@ function Show-ConnectionConfigMenu_WPF {
             [DwmUtils]::DwmSetWindowAttribute($handle, 20, [ref]$darkMode, 4) | Out-Null
         }
 
+        # --- High-DPI / Small Screen Scaling Logic ---
+        $window.add_Loaded({
+            try {
+                $screenHeight = [System.Windows.SystemParameters]::WorkArea.Height
+                # Check if the window height exceeds the available screen height
+                if ($window.ActualHeight -gt $screenHeight) {
+                    $ratio = $screenHeight / $window.ActualHeight
+                    # Downscale to the next 0.25 step (e.g. 0.8 -> 0.75)
+                    $scaleFactor = [Math]::Floor($ratio * 4) / 4
+
+                    if ($scaleFactor -lt 1.0) {
+                        if ($scaleFactor -lt 0.25) { $scaleFactor = 0.25 } # Minimum safety scale
+
+                        $transform = New-Object System.Windows.Media.ScaleTransform($scaleFactor, $scaleFactor)
+                        # Apply transform to the window content (assuming it's a Visual/UIElement)
+                        if ($window.Content -is [System.Windows.UIElement]) {
+                            $window.Content.LayoutTransform = $transform
+                        }
+                    }
+                }
+            } catch {
+                Write-Warning "Scaling logic failed: $_"
+            }
+        })
+
         $window.ShowDialog() | Out-Null
 
         if ($configState.Result -eq 'OK') {
