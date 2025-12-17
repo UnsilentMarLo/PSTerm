@@ -7,7 +7,9 @@
         FontFamily="Segoe UI"
         Background="{DynamicResource WindowBackground}"
         Foreground="{DynamicResource TextColor}"
-        FontSize="14">
+        FontSize="14"
+        UseLayoutRounding="True"
+        SnapsToDevicePixels="True">
     
     <Window.Resources>
         <!-- Toggle Switch Style for CheckBox -->
