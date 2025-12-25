@@ -778,6 +778,47 @@ function Show-ConnectionConfigMenu_WPF {
             [DwmUtils]::DwmSetWindowAttribute($handle, 20, [ref]$darkMode, 4) | Out-Null
         }
 
+        # --- High-DPI / Small Screen Scaling Logic ---
+        $window.add_Loaded({
+            try {
+                $window.UpdateLayout()
+                $screenHeight = [System.Windows.SystemParameters]::WorkArea.Height
+
+                # Measure content unconstrained to get the true desired size
+                $unconstrainedSize = [System.Windows.Size]::new([double]::PositiveInfinity, [double]::PositiveInfinity)
+                if ($window.Content -is [System.Windows.UIElement]) {
+                    $window.Content.Measure($unconstrainedSize)
+                    $contentDesiredHeight = $window.Content.DesiredSize.Height
+
+                    # Calculate chrome height (Title bar + borders)
+                    $chromeHeight = $window.ActualHeight - $window.Content.ActualHeight
+                    if ($chromeHeight -lt 0) { $chromeHeight = 0 }
+
+                    $totalDesiredHeight = $contentDesiredHeight + $chromeHeight
+
+                    # Check if the desired window height exceeds the available screen height
+                    if ($totalDesiredHeight -gt $screenHeight) {
+                        $ratio = $screenHeight / $totalDesiredHeight
+                        # Downscale to the next 0.25 step (e.g. 0.8 -> 0.75)
+                        $scaleFactor = [Math]::Floor($ratio * 4) / 4
+
+                        if ($scaleFactor -lt 1.0) {
+                            if ($scaleFactor -lt 0.25) { $scaleFactor = 0.25 } # Minimum safety scale
+
+                            $transform = New-Object System.Windows.Media.ScaleTransform($scaleFactor, $scaleFactor)
+                            $window.Content.LayoutTransform = $transform
+
+                            # Force window to resize to fit the new smaller content
+                            $window.SizeToContent = 'Manual'
+                            $window.SizeToContent = 'WidthAndHeight'
+                        }
+                    }
+                }
+            } catch {
+                Write-Warning "Scaling logic failed: $_"
+            }
+        })
+
         $window.ShowDialog() | Out-Null
 
         if ($configState.Result -eq 'OK') {

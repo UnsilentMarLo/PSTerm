@@ -540,7 +540,7 @@ function Start-SerialSession {
             $inputHelpers.Add("PageUp", "$([char]27)[5~"); $inputHelpers.Add("PageDown", "$([char]27)[6~")
             $inputHelpers.Add("Insert", "$([char]27)[2~")
 
-            Write-Host "--- Serial Session Started. Press ESC in the console to exit. ---`n" -ForegroundColor Green
+            Write-Host "--- Serial Session Started. Press Ctrl+ESC in the console to exit. ---`n" -ForegroundColor Green
 
             if ($Config.AutoInput) {
                 Write-Host "Sending auto-input..." -ForegroundColor Cyan
@@ -581,14 +581,30 @@ function Start-SerialSession {
             # Main loop for user input
             $consoleInputBroken = $false
             while ($true) {
+                # Check for unexpected disconnection
+                if (-not $Port.IsOpen) {
+                    break
+                }
+
                 if (-not $consoleInputBroken) {
                     try {
                         if ([Console]::KeyAvailable) {
                             $key = [Console]::ReadKey($true)
-                            if ($key.Key -eq 'Escape') { break }
+
+                            # Ctrl+ESC to exit
+                            if ($key.Key -eq 'Escape' -and ($key.Modifiers -band [ConsoleModifiers]::Control)) {
+                                break
+                            }
 
                             $output = if ($inputHelpers.ContainsKey($key.Key)) { $inputHelpers[$key.Key] } else { $key.KeyChar }
-                            $Port.Write($output)
+
+                            try {
+                                $Port.Write($output)
+                            } catch {
+                                Write-Warning "`nFailed to write to serial port: $_"
+                                Start-Sleep -Seconds 1
+                                break
+                            }
 
                             if ($logger -and $logUserInput) {
                                 $dataToLog = if ($Config.RawLogData) { $output } else { Remove-AnsiEscapeSequences $output }
@@ -733,7 +749,7 @@ function Start-SshSession {
 
         try { [Console]::TreatControlCAsInput = $true } catch { Write-Verbose "Could not set Console Mode: $_" }
 
-        Write-Host "--- SSH Session Started. Press ESC in the console to exit. ---`n" -ForegroundColor Green
+        Write-Host "--- SSH Session Started. Press Ctrl+ESC in the console to exit. ---`n" -ForegroundColor Green
 
         $inputHelpers = [Collections.Generic.Dictionary[ConsoleKey, String]]::new()
         $inputHelpers.Add("UpArrow", "$([char]27)[A"); $inputHelpers.Add("DownArrow", "$([char]27)[B")
@@ -791,12 +807,22 @@ function Start-SshSession {
                     try {
                         if ([Console]::KeyAvailable) {
                             $key = [Console]::ReadKey($true)
-                            if ($key.Key -eq 'Escape') { break }
+
+                            # Ctrl+ESC to exit
+                            if ($key.Key -eq 'Escape' -and ($key.Modifiers -band [ConsoleModifiers]::Control)) {
+                                break
+                            }
 
                             $output = if ($inputHelpers.ContainsKey($key.Key)) { $inputHelpers[$key.Key] } else { $key.KeyChar }
                             $bytes = [System.Text.Encoding]::UTF8.GetBytes($output)
-                            $shellStream.Write($bytes, 0, $bytes.Length)
-                            $shellStream.Flush()
+
+                            try {
+                                $shellStream.Write($bytes, 0, $bytes.Length)
+                                $shellStream.Flush()
+                            } catch {
+                                Write-Warning "`nFailed to write to SSH stream: $_"
+                                break
+                            }
 
                             if ($logger -and $logUserInput) {
                                 $dataToLog = if ($Config.RawLogData) { $output } else { Remove-AnsiEscapeSequences $output }
@@ -955,7 +981,7 @@ function Start-TelnetSession {
         $inputHelpers.Add("PageUp", "$([char]27)[5~"); $inputHelpers.Add("PageDown", "$([char]27)[6~")
         $inputHelpers.Add("Insert", "$([char]27)[2~")
 
-        Write-Host "--- Telnet Session Started. Press ESC in the console to exit. ---`n" -ForegroundColor Green
+        Write-Host "--- Telnet Session Started. Press Ctrl+ESC in the console to exit. ---`n" -ForegroundColor Green
 
         if ($Config.AutoInput) {
             Write-Host "Sending auto-input..." -ForegroundColor Cyan; Start-Sleep -Seconds 1
@@ -978,11 +1004,21 @@ function Start-TelnetSession {
                     try {
                         if ([Console]::KeyAvailable) {
                             $key = [Console]::ReadKey($true)
-                            if ($key.Key -eq 'Escape') { break }
+
+                            # Ctrl+ESC to exit
+                            if ($key.Key -eq 'Escape' -and ($key.Modifiers -band [ConsoleModifiers]::Control)) {
+                                break
+                            }
 
                             $output = if ($inputHelpers.ContainsKey($key.Key)) { $inputHelpers[$key.Key] } else { $key.KeyChar }
                             $bytes = [System.Text.Encoding]::ASCII.GetBytes($output)
-                            $stream.Write($bytes, 0, $bytes.Length)
+
+                            try {
+                                $stream.Write($bytes, 0, $bytes.Length)
+                            } catch {
+                                Write-Warning "`nFailed to write to Telnet stream: $_"
+                                break
+                            }
 
                             if ($logger -and $logUserInput) {
                                 $dataToLog = if ($Config.RawLogData) { $output } else { Remove-AnsiEscapeSequences $output }
