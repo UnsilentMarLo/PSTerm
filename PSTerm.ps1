@@ -71,9 +71,15 @@ if ([string]::IsNullOrWhiteSpace($Root)) { $Root = (Get-Location).Path }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# The core is loaded first because DPI awareness has to be declared before the
-# process creates a window, and the call lives in the core. Loading an assembly
-# creates no windows, so this ordering is safe.
+# Visual styles first, before anything can create a window: if a window handle
+# already exists when this is called it has no effect for the process, and the
+# window frame and common controls fall back to the classic theme.
+[System.Windows.Forms.Application]::EnableVisualStyles()
+[System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
+
+# The core is loaded next because DPI awareness also has to be declared before
+# the first window and the call lives in the core. Loading an assembly creates
+# no windows, so this ordering is safe.
 . (Join-Path $Root 'src\Bootstrap.ps1')
 
 try {
@@ -92,9 +98,6 @@ catch {
     catch { Write-Error $message }
     exit 1
 }
-
-[System.Windows.Forms.Application]::EnableVisualStyles()
-[System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
 
 . (Join-Path $Root 'src\Settings.ps1')
 . (Join-Path $Root 'src\Secrets.ps1')
