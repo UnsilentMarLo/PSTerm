@@ -220,7 +220,9 @@ function Initialize-PSTermCore {
     # Compiling straight to the cache path would leave a half-written file behind
     # on failure, and fails outright if another PSTerm instance has it loaded.
     # Build to a temporary file and move it into place.
-    $tempDll = Join-Path $binDir ("PSTerm.Core.$edition." + [guid]::NewGuid().ToString('N') + '.tmp')
+    # The extension must stay .dll: Add-Type refuses to load anything else, and
+    # this file is loaded directly when the cache slot is locked by another instance.
+    $tempDll = Join-Path $binDir ("PSTerm.Core.$edition." + [guid]::NewGuid().ToString('N') + '.dll')
     try {
         Add-Type @addTypeArgs -OutputAssembly $tempDll -OutputType Library
 

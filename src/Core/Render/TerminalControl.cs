@@ -50,7 +50,7 @@ namespace PSTerm.Render
         public TerminalInputEventArgs(string text) { Text = text; }
     }
 
-    public sealed class TerminalControl : Control
+    public sealed class TerminalControl : Control, PSTerm.ITerminalSink
     {
         // ---- model ---------------------------------------------------------
         private TerminalEmulator _term;
