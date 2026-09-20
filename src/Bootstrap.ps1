@@ -105,18 +105,27 @@ Run PSTerm with Windows PowerShell instead (PSTerm.cmd does this by default).
             catch { Write-Verbose "Optional assembly '$name' is unavailable: $($_.Exception.Message)" }
         }
 
-        foreach ($typeName in @(
-            'System.Windows.Forms.Control',
-            'System.Drawing.Point',
-            'System.IO.Ports.SerialPort'
+        # WinForms and Drawing are spread over several assemblies, including
+        # internal ones (System.Private.Windows.*) that public types leak into
+        # their signatures. Listing them by hand breaks on every .NET release, so
+        # take the whole family from $PSHOME instead.
+        foreach ($pattern in @(
+            'System.Windows.Forms*.dll',
+            'System.Drawing*.dll',
+            'System.Private.Windows*.dll',
+            'System.IO.Ports.dll',
+            'Accessibility.dll'
         )) {
-            $type = $typeName -as [type]
-            if ($type -and $type.Assembly.Location) { $refs.Add($type.Assembly.Location) }
+            foreach ($f in Get-ChildItem -LiteralPath $PSHOME -Filter $pattern -File -ErrorAction SilentlyContinue) {
+                # Native DLLs share the directory and would fail the compile with
+                # "PE image does not contain managed metadata".
+                try {
+                    [void][System.Reflection.AssemblyName]::GetAssemblyName($f.FullName)
+                    $refs.Add($f.FullName)
+                }
+                catch { }
+            }
         }
-
-        # WinForms types are split across a second assembly that is not always loaded yet.
-        $primitives = Join-Path $PSHOME 'System.Windows.Forms.Primitives.dll'
-        if (Test-Path -LiteralPath $primitives) { $refs.Add($primitives) }
 
         return @($refs | Sort-Object -Unique)
     }
