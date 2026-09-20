@@ -1,1001 +1,185 @@
-#region Type and Profile Setup
-# Load necessary assemblies for GUI and serial port
+<#
+    PSTerm - a native PowerShell Serial/SSH/Telnet terminal.
+    Copyright (C) 2026 Marlo K <Plays.xenon@yahoo.de>
+
+    This program is free software: you can redistribute it and/or modify
+    it under the terms of the GNU General Public License as published by
+    the Free Software Foundation, either version 3 of the License, or
+    (at your option) any later version.
+
+    This program is distributed in the hope that it will be useful,
+    but WITHOUT ANY WARRANTY; without even the implied warranty of
+    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+    GNU General Public License for more details.
+
+    You should have received a copy of the GNU General Public License
+    along with this program.  If not, see <https://www.gnu.org/licenses/>.
+#>
+
+<#
+.SYNOPSIS
+    Launches PSTerm.
+
+.DESCRIPTION
+    This script only bootstraps: it locates the install folder, compiles or loads
+    the native core, loads the UI modules and shows the window. Everything that
+    touches session data lives in the compiled core under src\Core.
+
+.PARAMETER Connect
+    Open a session immediately, using the same syntax as the quick-connect bar:
+    "user@host", "host:2222", "telnet host", "COM3:115200" or a saved profile name.
+
+.PARAMETER NoWindow
+    Verify the installation and exit without showing the UI. Useful for a smoke
+    test or a first-run compile on a new machine.
+
+.PARAMETER Rebuild
+    Force the native core to recompile even when the cache is valid.
+
+.EXAMPLE
+    .\PSTerm.ps1
+
+.EXAMPLE
+    .\PSTerm.ps1 -Connect admin@core-sw1
+#>
+[CmdletBinding()]
+param(
+    [string]$Connect,
+    [switch]$NoWindow,
+    [switch]$Rebuild
+)
+
+Set-StrictMode -Version Latest
+$ErrorActionPreference = 'Stop'
+
+# -----------------------------------------------------------------------------
+# Locate the install folder
+# -----------------------------------------------------------------------------
+# $PSScriptRoot is empty when the script has been compiled into an executable,
+# so fall back to the host process's own directory.
+
+$Root = $PSScriptRoot
+if ([string]::IsNullOrWhiteSpace($Root)) {
+    $Root = Split-Path -Parent ([System.Diagnostics.Process]::GetCurrentProcess().MainModule.FileName)
+}
+if ([string]::IsNullOrWhiteSpace($Root)) { $Root = (Get-Location).Path }
+
+# -----------------------------------------------------------------------------
+# Load assemblies and the native core
+# -----------------------------------------------------------------------------
+
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-Add-Type -AssemblyName Microsoft.VisualBasic
-Add-Type -AssemblyName System
-[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
 
-# Use PInvoke to hide/show the console window for a cleaner GUI experience
-Add-Type -TypeDefinition @"
-    using System;
-    using System.Runtime.InteropServices;
-
-    public class ConsoleUtils
-    {
-        [DllImport("kernel32.dll")]
-        public static extern IntPtr GetConsoleWindow();
-
-        [DllImport("user32.dll")]
-        public static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
-    }
-"@
-
-# Determine script base directory reliably
-if ($MyInvocation.MyCommand.CommandType -eq "ExternalScript") {
-    $ScriptBaseDir = Split-Path -Parent -Path $MyInvocation.MyCommand.Definition
+# DPI awareness has to be set before the first window exists, or the whole UI is
+# bitmap-stretched and blurry on a scaled display.
+try { [System.Windows.Forms.Application]::SetHighDpiMode([System.Windows.Forms.HighDpiMode]::PerMonitorV2) | Out-Null }
+catch {
+    # Not available on .NET Framework; the app.manifest route is not open to a
+    # script host, so on 5.1 WinForms falls back to system DPI awareness.
 }
-else {
-    $ScriptBaseDir = Split-Path -Parent -Path ([Environment]::GetCommandLineArgs()[0])
-    if ([string]::IsNullOrWhiteSpace($ScriptBaseDir)) {
-        $ScriptBaseDir = if (![string]::IsNullOrWhiteSpace($PSScriptRoot)) { $PSScriptRoot } else { Get-Location }
-    }
-}
+[System.Windows.Forms.Application]::EnableVisualStyles()
+[System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
 
-$currentPSEdition = $PSVersionTable.PSEdition
-$currentCLRVersion = if ($PSVersionTable.CLRVersion) { $PSVersionTable.CLRVersion.ToString() }
+. (Join-Path $Root 'src\Bootstrap.ps1')
 
-Write-Host "Detected PowerShell Edition: $currentPSEdition" -ForegroundColor Cyan
-Write-Host "Detected CLR Version: $currentCLRVersion" -ForegroundColor Cyan
-
-# Unblock DLLs that might be blocked after extraction
-Get-ChildItem -Path $ScriptBaseDir -Recurse | Unblock-File
-
-# Import the Posh-SSH module
 try {
-    Import-Module "$ScriptBaseDir\lib\Posh-SSH\Posh-SSH.psd1" -ErrorAction Stop
-    Write-Host "Posh-SSH module imported successfully." -ForegroundColor Cyan
+    Initialize-PSTermCore -Root $Root -Force:$Rebuild
 }
 catch {
-    Write-Error "Failed to import the Posh-SSH module. Error: $_"
-    Read-Host "Press Enter to exit..."
-    exit
-}
-
-# Create a directory for connection profiles if it doesn't exist
-$ProfilesDir = Join-Path $ScriptBaseDir "Profiles"
-if (!(Test-Path $ProfilesDir)) { New-Item -ItemType Directory -Path $ProfilesDir | Out-Null }
-
-# Consolidate profiles into a single JSON file.
-$ProfilesFile = Join-Path $ProfilesDir "profiles.json"
-if (-not (Test-Path $ProfilesFile)) {
-    Write-Host "Creating default profiles file."
-    $defaultProfiles = @(
-        @{
-            Name                = "Default-Serial"
-            Type                = "Serial"
-            COMPort             = ""
-            BaudRate            = 9600
-            DataBits            = 8
-            Parity              = "None"
-            StopBits            = "One"
-            Handshake           = "None"
-            RTSEnable           = $false
-            Host                = ""
-            User                = ""
-            SshPort             = 22
-            TelnetPort          = 23
-            TelnetNegotiation   = "Active"
-            TextColor           = "White"
-            BackgroundColor     = "Black"
-            CursorSize          = "Normal"
-            AutoInput           = ""
-            BackgroundLogging   = $false
-            LogFilePath         = ""
-            RawLogData          = $false
-            ObfuscatePasswords  = $false
-            KeepAlive           = $false
-            ForceTerminalColors = $true # Serial connections should control the terminal colors by default
-        },
-        @{
-            Name                = "Default-SSH"
-            Type                = "SSH"
-            COMPort             = ""
-            BaudRate            = 9600
-            DataBits            = 8
-            Parity              = "None"
-            StopBits            = "One"
-            Handshake           = "None"
-            RTSEnable           = $false
-            Host                = ""
-            User                = ""
-            SshPort             = 22
-            TelnetPort          = 23
-            TelnetNegotiation   = "Active"
-            TextColor           = "White"
-            BackgroundColor     = "Black"
-            CursorSize          = "Normal"
-            AutoInput           = ""
-            BackgroundLogging   = $false
-            LogFilePath         = ""
-            RawLogData          = $false
-            ObfuscatePasswords  = $false
-            KeepAlive           = $false
-            ForceTerminalColors = $false # SSH servers often force their own colors; disable by default
-        },
-        @{
-            Name                = "Default-Telnet"
-            Type                = "Telnet"
-            COMPort             = ""
-            BaudRate            = 9600
-            DataBits            = 8
-            Parity              = "None"
-            StopBits            = "One"
-            Handshake           = "None"
-            RTSEnable           = $false
-            Host                = ""
-            User                = ""
-            SshPort             = 22
-            TelnetPort          = 23
-            TelnetNegotiation   = "Active"
-            TextColor           = "White"
-            BackgroundColor     = "Black"
-            CursorSize          = "Normal"
-            AutoInput           = ""
-            BackgroundLogging   = $false
-            LogFilePath         = ""
-            RawLogData          = $false
-            ObfuscatePasswords  = $false
-            KeepAlive           = $false
-            ForceTerminalColors = $true # Telnet connections should control the terminal colors by default
-        }
-    )
-    $defaultProfiles | ConvertTo-Json -Depth 5 | Set-Content -Path $ProfilesFile -Encoding UTF8
-}
-
-#endregion Type and Profile Setup
-
-#region Profile Management Functions
-
-function Get-ProfileList {
-    if ($ProfilesFile -and (Test-Path $ProfilesFile)) {
-        try {
-            $profiles = Get-Content -Raw -Path $ProfilesFile | ConvertFrom-Json
-            if ($profiles -is [array]) {
-                return $profiles.Name
-            } elseif ($profiles) {
-                return @($profiles.Name)
-            }
-        } catch {
-            Write-Warning "Could not read or parse profiles file: $ProfilesFile"
-        }
-    }
-    return @()
-}
-
-
-function Import-Profile($name) {
-    if ($ProfilesFile -and (Test-Path $ProfilesFile)) {
-        $profiles = Get-Content -Raw -Path $ProfilesFile | ConvertFrom-Json
-        # Handle case where JSON contains a single object instead of an array
-        if ($profiles -isnot [array]) { $profiles = @($profiles) }
-        return $profiles | Where-Object { $_.Name -eq $name }
-    }
-    return $null
-}
-
-function Save-Profile($name, $config) {
-    $name = $name.Trim()
-    $profiles = @()
-
-    if ($ProfilesFile -and (Test-Path $ProfilesFile)) {
-        $profiles = Get-Content -Raw -Path $ProfilesFile | ConvertFrom-Json
-
-        # Ensure it's always a flat array of objects
-        if ($profiles -isnot [System.Collections.IEnumerable] -or $profiles -is [string]) {
-            $profiles = @($profiles) # Single object -> array
-        } else {
-            $profiles = @($profiles) -ne $null # Flatten nested array
-        }
-    }
-
-    # Filter out matching profile names (case-insensitive) - a consideration
-    # $profiles = $profiles | Where-Object { $_.Name -and $_.Name.Trim().ToLower() -ne $name.ToLower() }
-
-	$profiles = $profiles | Where-Object { $_.Name -ne $name }
-	
-    $config.Name = $name
-    $profiles += $config
-
-    $profiles | ConvertTo-Json -Depth 5 | Set-Content -Path $ProfilesFile -Encoding UTF8
-}
-
-#endregion Profile Management Functions
-
-#region Session Handlers
-
-# Function to remove ANSI escape sequences from a string
-function Remove-AnsiEscapeSequences {
-    param([string]$textinput)
-    if (-not $textinput) { return $textinput }
-
-    $esc = [char]27
-    # CSI, OSC, and other common escape patterns
-    $pattern = "$esc\[[0-9;?]*[@-~]|$esc\][^\a\e]*([\a]|\e\\)|$esc."
-    return $textinput -replace $pattern, ''
-}
-
-function Start-SessionLogger {
-    param(
-        [string]$LogFilePath,
-        [switch]$RawSessionData,
-        [switch]$ObfuscatePasswords
-    )
-
-    if ([string]::IsNullOrWhiteSpace($LogFilePath)) { return $null }
-
+    $message = "PSTerm could not start.`n`n$($_.Exception.Message)"
     try {
-        $logDir = Split-Path -Path $LogFilePath -Parent
-        if ($logDir -and (-not (Test-Path $logDir))) {
-            New-Item -ItemType Directory -Path $logDir -Force | Out-Null
-        }
-        # Create or overwrite log file
-        New-Item -Path $LogFilePath -ItemType File -Force | Out-Null
+        [void][System.Windows.Forms.MessageBox]::Show($message, 'PSTerm',
+            [System.Windows.Forms.MessageBoxButtons]::OK,
+            [System.Windows.Forms.MessageBoxIcon]::Error)
     }
-    catch {
-        Write-Error "Failed to create log file at '$LogFilePath'. Logging will be disabled. Error: $_"
-        return $null
-    }
-
-    # Create a thread-safe queue for log entries
-    $logQueue = [System.Collections.Queue]::Synchronized((New-Object System.Collections.Queue))
-    $stopFlag = [ref]$false
-
-    # Define the logger scriptblock to run in a background runspace
-    $loggerScript = {
-        param($path, $queue, $stopRef, $obfuscate)
-
-        $passwordPromptDetected = $false
-        $passwordPromptRegex = 'password:|passphrase for|enter password'
-
-        while (-not $stopRef.Value) {
-            while ($queue.Count -gt 0) {
-                $logEntry = $queue.Dequeue()
-                if ($null -eq $logEntry) { continue }
-
-                $dataToLog = $logEntry.Data
-
-                if ($obfuscate) {
-                    if ($logEntry.Source -eq 'Server') {
-                        if ($dataToLog -match $passwordPromptRegex) {
-                            $passwordPromptDetected = $true
-                        }
-                        Add-Content -Path $path -Value $dataToLog -NoNewline -Encoding UTF8
-                    }
-                    elseif ($logEntry.Source -eq 'User') {
-                        if ($passwordPromptDetected) {
-                            $obfuscatedData = '*' * $dataToLog.Length
-                            Add-Content -Path $path -Value $obfuscatedData -NoNewline -Encoding UTF8
-                            # Reset after user hits enter
-                            if ($dataToLog -match "[\r\n]") {
-                                $passwordPromptDetected = $false
-                            }
-                        }
-                        else {
-                            Add-Content -Path $path -Value $dataToLog -NoNewline -Encoding UTF8
-                        }
-                    }
-                }
-                else {
-                    Add-Content -Path $path -Value $dataToLog -NoNewline -Encoding UTF8
-                }
-            }
-            Start-Sleep -Milliseconds 100
-        }
-    }
-
-    # Create and start the runspace
-    $runspace = [powershell]::Create()
-    $runspace.AddScript($loggerScript).AddArgument($LogFilePath).AddArgument($logQueue).AddArgument($stopFlag).AddArgument($ObfuscatePasswords.IsPresent) | Out-Null
-    $runspace.Runspace.ThreadOptions = "ReuseThread"
-    $asyncResult = $runspace.BeginInvoke()
-
-    # Return a control object for the logger
-    return [PSCustomObject]@{
-        Runspace    = $runspace
-        AsyncResult = $asyncResult
-        Queue       = $logQueue
-        StopFlag    = $stopFlag
-    }
+    catch { Write-Error $message }
+    exit 1
 }
 
-function Stop-SessionLogger {
-    param(
-        [Parameter(Mandatory = $true)]
-        $Logger
-    )
-    if ($Logger -and $Logger.Runspace) {
-        $Logger.StopFlag.Value = $true
-        # Wait for the logger to finish processing its queue before disposing
-        try {
-            $Logger.Runspace.EndInvoke($Logger.AsyncResult)
-        } catch {
-            # Ignore errors on dispose, as the runspace might already be stopped.
+. (Join-Path $Root 'src\Settings.ps1')
+. (Join-Path $Root 'src\Secrets.ps1')
+. (Join-Path $Root 'src\Profiles.ps1')
+. (Join-Path $Root 'src\Connect.ps1')
+. (Join-Path $Root 'src\Ui\Theme.ps1')
+. (Join-Path $Root 'src\Ui\Dialogs.ps1')
+. (Join-Path $Root 'src\Ui\MainWindow.ps1')
+
+# -----------------------------------------------------------------------------
+# Environment report / smoke test
+# -----------------------------------------------------------------------------
+
+if ($NoWindow) {
+    Write-Host "PSTerm installation check" -ForegroundColor Cyan
+    Write-Host ("-" * 40)
+    Write-Host "Install folder  : $Root"
+    Write-Host "PowerShell      : $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))"
+    Write-Host "Native core     : loaded"
+
+    $pty = [PSTerm.Backends.ConPtyBackend]::IsSupported
+    Write-Host "Pseudo-console  : $(if ($pty) { 'available' } else { 'NOT available - SSH and local shells need Windows 10 1809+' })" `
+        -ForegroundColor $(if ($pty) { 'Green' } else { 'Yellow' })
+
+    $ssh = [PSTerm.Backends.ConPtyCommands]::FindSsh()
+    Write-Host "OpenSSH client  : $(if ($ssh) { $ssh } else { 'NOT found - install the OpenSSH Client optional feature' })" `
+        -ForegroundColor $(if ($ssh) { 'Green' } else { 'Yellow' })
+
+    $ports = @([PSTerm.Backends.SerialBackend]::GetPortNames())
+    Write-Host "Serial ports    : $(if ($ports.Count) { $ports -join ', ' } else { 'none detected' })"
+
+    $store = Import-PSTermProfiles -Root $Root
+    Write-Host "Saved profiles  : $(@($store.profiles).Count)"
+    exit 0
+}
+
+# -----------------------------------------------------------------------------
+# Run
+# -----------------------------------------------------------------------------
+
+$form = New-PSTermMainWindow -Root $Root
+
+if ($Connect) {
+    # Opened from Shown, not before: the terminal control must exist and be laid
+    # out before it can tell the transport the real window size.
+    $form.Add_Shown({
+        $state = $form.Tag
+        $profile = Get-PSTermProfileByName -Store $state.Store -Name $Connect
+        if (-not $profile) { $profile = ConvertFrom-PSTermQuickConnect -Text $Connect }
+        if ($profile) {
+            New-PSTermSessionTab -State $state -Profile $profile | Out-Null
         }
-        $Logger.Runspace.Dispose()
-    }
-}
-
-function Start-SessionKeepAlive {
-    param(
-        [System.IO.Stream]$Stream,
-        [int]$IntervalSeconds = 30
-    )
-    # Start a background job to send a NULL byte periodically to keep the session alive
-    $job = Start-Job -ScriptBlock {
-        param($stream, $interval)
-        while ($true) {
-            Start-Sleep -Seconds $interval
-            try {
-                if ($stream.CanWrite) {
-                    $stream.Write([byte[]]@(0), 0, 1)
-                } else { break }
-            }
-            catch { break }
+        else {
+            Set-PSTermStatusMessage -State $state -Message "Could not interpret '$Connect'." -Level Warning
         }
-    } -ArgumentList $Stream, $IntervalSeconds
-    return $job
+    }.GetNewClosure())
 }
 
-function Stop-SessionKeepAlive($job) {
-    if ($job) {
-        Stop-Job $job -Passthru | Remove-Job -Force
-    }
-}
-
-function Start-SerialSession {
-    param(
-        [System.IO.Ports.SerialPort]$Port,
-        [PSCustomObject]$Config
-    )
-
-    [Console]::TreatControlCAsInput = $true
-    $logger = $null
-    $keepAliveJob = $null
-    $receiveEvent = $null
-
+# Hide the console window when launched from one. PSTerm.cmd starts PowerShell
+# without a window, but running the script directly from a prompt would otherwise
+# leave an empty console behind the UI.
+if (-not $env:PSTERM_KEEP_CONSOLE) {
     try {
-        # Apply terminal colors if forced
-        if ($Config.ForceTerminalColors) {
-            $Host.UI.RawUI.ForegroundColor = $Config.TextColor
-            $Host.UI.RawUI.BackgroundColor = $Config.BackgroundColor
-            Clear-Host
-        }
-        
-		$host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
-		
-        if ($Config.BackgroundLogging) {
-            $logger = Start-SessionLogger -LogFilePath $Config.LogFilePath -RawSessionData:$Config.RawLogData -ObfuscatePasswords:$Config.ObfuscatePasswords
-        }
+        Add-Type -Namespace PSTermNative -Name Win32 -MemberDefinition @'
+[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+public static extern System.IntPtr GetConsoleWindow();
+[System.Runtime.InteropServices.DllImport("user32.dll")]
+public static extern bool ShowWindow(System.IntPtr hWnd, int nCmdShow);
+[System.Runtime.InteropServices.DllImport("kernel32.dll")]
+public static extern int GetConsoleProcessList(int[] processList, int count);
+'@ -ErrorAction Stop
 
-        $inputHelpers = [Collections.Generic.Dictionary[ConsoleKey, String]]::new()
-        $inputHelpers.Add("UpArrow", "$([char]27)[A"); $inputHelpers.Add("DownArrow", "$([char]27)[B")
-        $inputHelpers.Add("RightArrow", "$([char]27)[C"); $inputHelpers.Add("LeftArrow", "$([char]27)[D")
-        $inputHelpers.Add("Delete", $([char]127)); $inputHelpers.Add("Backspace", $([char]8))
-        $inputHelpers.Add("Home", "$([char]27)[H"); $inputHelpers.Add("End", "$([char]27)[F")
-        $inputHelpers.Add("PageUp", "$([char]27)[5~"); $inputHelpers.Add("PageDown", "$([char]27)[6~")
-        $inputHelpers.Add("Insert", "$([char]27)[2~")
-
-        Write-Host "--- Serial Session Started. Press ESC in the console to exit. ---`n" -ForegroundColor Green
-
-        if ($Config.AutoInput) {
-            Write-Host "Sending auto-input..." -ForegroundColor Cyan
-            foreach ($line in $Config.AutoInput.Split("`n")) {
-                $command = $line.Trim()
-                $Port.WriteLine($command)
-                if ($logger) { $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = ($command + "`r`n") }) }
-                Start-Sleep -Milliseconds 200
-            }
-        }
-
-        if ($Config.KeepAlive) {
-            $keepAliveJob = Start-SessionKeepAlive -Stream $Port.BaseStream
-        }
-
-        # Register an event for receiving data
-        $receiveEvent = Register-ObjectEvent -InputObject $Port -EventName DataReceived -Action {
-            try {
-                $p = $event.MessageData.Port
-                $log = $event.MessageData.Logger
-                $cfg = $event.MessageData.Config
-                $data = $p.ReadExisting()
-                Write-Host $data -NoNewline
-
-                if ($null -ne $log) {
-                    $dataToLog = if ($cfg.RawLogData) { $data } else { Remove-AnsiEscapeSequences $data }
-                    $log.Queue.Enqueue([PSCustomObject]@{Source = 'Server'; Data = $dataToLog })
-                }
-            }
-            catch { Write-Warning "Event handler error: $_" }
-        } -MessageData ([PSCustomObject]@{Port = $Port; Logger = $logger; Config = $Config })
-
-        # Main loop for user input
-        while ($true) {
-            if ([Console]::KeyAvailable) {
-                $key = [Console]::ReadKey($true)
-                if ($key.Key -eq 'Escape') { break }
-
-                $output = if ($inputHelpers.ContainsKey($key.Key)) { $inputHelpers[$key.Key] } else { $key.KeyChar }
-                $port.Write($output)
-
-                if ($logger) {
-                    $dataToLog = if ($Config.RawLogData) { $output } else { Remove-AnsiEscapeSequences $output }
-                    $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = $dataToLog })
-                }
-            }
-            Start-Sleep -Milliseconds 10
-        }
-    }
-    finally {
-        Write-Host "`n--- Exiting serial session. ---" -ForegroundColor Yellow
-        if ($keepAliveJob) { Stop-SessionKeepAlive $keepAliveJob }
-        if ($receiveEvent) {
-            Get-EventSubscriber -SourceIdentifier $receiveEvent.Name | Unregister-Event
-            $receiveEvent | Remove-Job -Force
-        }
-        if ($logger) { Stop-SessionLogger $logger }
-        [Console]::TreatControlCAsInput = $false
-    }
-}
-
-function Start-SshSession {
-    param(
-        [PSCustomObject]$Config
-    )
-
-    $poshSession = $null
-    $client = $null
-    $shellStream = $null
-    $logger = $null
-
-    try {
-        # Apply terminal colors if forced
-        if ($Config.ForceTerminalColors) {
-            $Host.UI.RawUI.ForegroundColor = $Config.TextColor
-            $Host.UI.RawUI.BackgroundColor = $Config.BackgroundColor
-            Clear-Host
-        }
-        # Always increase buffer for better scrollback
-        $host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
-
-        if ($Config.BackgroundLogging) {
-            $logger = Start-SessionLogger -LogFilePath $Config.LogFilePath -RawSessionData:$Config.RawLogData -ObfuscatePasswords:$Config.ObfuscatePasswords
-        }
-
-        Write-Host "Connecting to $($Config.Host) on port $($Config.SshPort)..." -ForegroundColor Cyan
-        $user = if ($Config.User) { $Config.User } else { Read-Host "Enter SSH username" }
-        $securePassword = Read-Host "Enter SSH password for '$user'" -AsSecureString
-        $credential = New-Object System.Management.Automation.PSCredential ($user, $securePassword)
-
-        if (-not $credential) { throw "User cancelled the credential prompt." }
-
-        $sessionParams = @{
-            ComputerName = $Config.Host
-            Port         = $Config.SshPort
-            Credential   = $credential
-            ErrorAction  = 'Stop'
-        }
-        if ($Config.KeepAlive) {
-            $sessionParams['KeepAliveInterval'] = 30 # Posh-SSH KeepAlive is in seconds
-        }
-
-        $poshSession = New-SSHSession @sessionParams
-        $client = ($poshSession | Select-Object -First 1).Session
-        if (-not $client.IsConnected) { throw "Failed to establish an SSH connection." }
-
-        $termWidth = if ($Host.UI.RawUI.WindowSize.Width -gt 0) { $Host.UI.RawUI.WindowSize.Width } else { 80 }
-        $termHeight = if ($Host.UI.RawUI.WindowSize.Height -gt 0) { $Host.UI.RawUI.WindowSize.Height } else { 24 }
-        $shellStream = $client.CreateShellStream("xterm-256color", $termWidth, $termHeight, 0, 0, 4096)
-
-        [Console]::TreatControlCAsInput = $true
-        
-        Write-Host "--- SSH Session Started. Press ESC in the console to exit. ---`n" -ForegroundColor Green
-
-        $inputHelpers = [Collections.Generic.Dictionary[ConsoleKey, String]]::new()
-        $inputHelpers.Add("UpArrow", "$([char]27)[A"); $inputHelpers.Add("DownArrow", "$([char]27)[B")
-        $inputHelpers.Add("RightArrow", "$([char]27)[C"); $inputHelpers.Add("LeftArrow", "$([char]27)[D")
-        $inputHelpers.Add("Delete", "$([char]27)[3~"); $inputHelpers.Add("Backspace", $([char]127))
-        $inputHelpers.Add("Home", "$([char]27)[H"); $inputHelpers.Add("End", "$([char]27)[F")
-        $inputHelpers.Add("PageUp", "$([char]27)[5~"); $inputHelpers.Add("PageDown", "$([char]27)[6~")
-        $inputHelpers.Add("Insert", "$([char]27)[2~"); $inputHelpers.Add("Tab", "`t")
-
-        # Read initial output from server and log it
-        Start-Sleep -Milliseconds 500
-        $initialOutput = ''
-        $buffer = New-Object byte[] 4096
-        while ($shellStream.DataAvailable) {
-            $read = $shellStream.Read($buffer, 0, $buffer.Length)
-            if ($read -gt 0) {
-                $initialOutput += [System.Text.Encoding]::UTF8.GetString($buffer, 0, $read)
-            } else { break }
-        }
-        Write-Host $initialOutput -NoNewline
-        if ($logger) {
-            $dataToLog = if ($Config.RawLogData) { $initialOutput } else { Remove-AnsiEscapeSequences $initialOutput }
-            $logger.Queue.Enqueue([PSCustomObject]@{Source = 'Server'; Data = $dataToLog })
-        }
-
-        if ($Config.AutoInput) {
-            Write-Host "`nSending auto-input..." -ForegroundColor Cyan
-            foreach ($line in $Config.AutoInput.Split("`n")) {
-                $command = $line.Trim() + "`r`n"
-                $bytes = [System.Text.Encoding]::UTF8.GetBytes($command)
-                $shellStream.Write($bytes, 0, $bytes.Length)
-                $shellStream.Flush()
-                if ($logger) { $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = $command }) }
-                Start-Sleep -Milliseconds 200
-            }
-        }
-
-        # Main interactive loop
-        while ($client.IsConnected) {
-            try {
-                if ($shellStream.DataAvailable) {
-                    $bytesRead = $shellStream.Read($buffer, 0, $buffer.Length)
-                    if ($bytesRead -gt 0) {
-                        $text = [System.Text.Encoding]::UTF8.GetString($buffer, 0, $bytesRead)
-                        Write-Host $text -NoNewline
-                        if ($logger) {
-                            $dataToLog = if ($Config.RawLogData) { $text } else { Remove-AnsiEscapeSequences $text }
-                            $logger.Queue.Enqueue([PSCustomObject]@{Source = 'Server'; Data = $dataToLog })
-                        }
-                    }
-                }
-
-                if ([Console]::KeyAvailable) {
-                    $key = [Console]::ReadKey($true)
-                    if ($key.Key -eq 'Escape') { break }
-
-                    $output = if ($inputHelpers.ContainsKey($key.Key)) { $inputHelpers[$key.Key] } else { $key.KeyChar }
-                    $bytes = [System.Text.Encoding]::UTF8.GetBytes($output)
-                    $shellStream.Write($bytes, 0, $bytes.Length)
-                    $shellStream.Flush()
-
-                    # BUGFIX: Do NOT log user's keypress here. The server echo will be logged instead,
-                    # preventing double characters in the log file.
-                }
-                Start-Sleep -Milliseconds 20
-            }
-            catch [System.ObjectDisposedException] {
-                # This is an expected exception when the remote host closes the connection (e.g., via 'exit' command).
-                # We break the loop gracefully and let the 'finally' block handle cleanup.
-                Write-Verbose "ShellStream was disposed, indicating a clean session exit."
-                break
-            }
-            catch {
-                # Catch any other unexpected errors during the session.
-                Write-Error "An error occurred during the SSH session: $_"
-                break
-            }
+        $handle = [PSTermNative.Win32]::GetConsoleWindow()
+        if ($handle -ne [IntPtr]::Zero) {
+            # Only hide a console PSTerm owns. Hiding a shared one would take the
+            # user's own prompt away with it.
+            $list = New-Object int[] 4
+            $count = [PSTermNative.Win32]::GetConsoleProcessList($list, 4)
+            if ($count -le 1) { [void][PSTermNative.Win32]::ShowWindow($handle, 0) }
         }
     }
     catch {
-        Write-Error "SSH session failed: $($_.Exception.Message)"
-        if ($_.Exception.InnerException) { Write-Error "Inner Exception: $($_.Exception.InnerException.Message)" }
-        Read-Host "Press Enter to continue..."
-    }
-    finally {
-        Write-Host "`n--- SSH Session Closed. ---" -ForegroundColor Yellow
-        if ($logger) { Stop-SessionLogger $logger }
-        if ($shellStream) { $shellStream.Dispose() }
-        if ($poshSession) { Remove-SSHSession -SSHSession $poshSession }
-        [Console]::TreatControlCAsInput = $false
+        # Cosmetic only; never block startup over it.
     }
 }
 
-function Start-TelnetSession {
-    param(
-        [PSCustomObject]$Config
-    )
-
-    $client = New-Object System.Net.Sockets.TcpClient
-    $stream = $null
-    $logger = $null
-    $keepAliveJob = $null
-    $readerJob = $null
-
-    try {
-        # Apply terminal colors if forced
-        if ($Config.ForceTerminalColors) {
-            $Host.UI.RawUI.ForegroundColor = $Config.TextColor
-            $Host.UI.RawUI.BackgroundColor = $Config.BackgroundColor
-            Clear-Host
-        }
-		
-		$host.UI.RawUI.BufferSize = New-Object Management.Automation.Host.Size ($host.UI.RawUI.BufferSize.Width, 10000)
-        
-        if ($Config.BackgroundLogging) {
-            $logger = Start-SessionLogger -LogFilePath $Config.LogFilePath -RawSessionData:$Config.RawLogData -ObfuscatePasswords:$Config.ObfuscatePasswords
-        }
-
-        Write-Host "Connecting to $($Config.Host) on port $($Config.TelnetPort)..." -ForegroundColor Cyan
-        $client.Connect($Config.Host, $Config.TelnetPort)
-        $stream = $client.GetStream()
-
-        # Start a background job to read from the stream
-        $readerJob = Start-Job -InitializationScript ${function:Remove-AnsiEscapeSequences} -ScriptBlock {
-            param($streamRef, $logQueueRef, $rawLogData)
-            $stream = $streamRef.get_Value()
-            $logQueue = $logQueueRef.get_Value()
-            $encoding = [System.Text.Encoding]::ASCII
-            $buffer = New-Object byte[] 4096
-            $IAC = 255; $DONT = 254; $DO = 253; $WONT = 252; $WILL = 251
-
-            while ($stream.CanRead) {
-                try {
-                    $bytesRead = $stream.Read($buffer, 0, $buffer.Length)
-                    if ($bytesRead -eq 0) { break }
-
-                    $outputBuffer = New-Object System.IO.MemoryStream
-                    for ($i = 0; $i -lt $bytesRead; $i++) {
-                        if ($buffer[$i] -eq $IAC) { # Handle Telnet commands
-                            $command = $buffer[++$i]; $option = $buffer[++$i]
-                            if ($command -eq $DO) { $stream.Write(@($IAC, $WONT, $option), 0, 3) }
-                            elseif ($command -eq $WILL) { $stream.Write(@($IAC, $DONT, $option), 0, 3) }
-                        } else {
-                            $outputBuffer.WriteByte($buffer[$i])
-                        }
-                    }
-
-                    if ($outputBuffer.Length -gt 0) {
-                        $text = $encoding.GetString($outputBuffer.ToArray())
-                        Write-Host $text -NoNewline
-                        if ($logQueue) {
-                            $dataToLog = if ($rawLogData) { $text } else { Remove-AnsiEscapeSequences $text }
-                            $logQueue.Enqueue([PSCustomObject]@{Source = 'Server'; Data = $dataToLog })
-                        }
-                    }
-                } catch { break }
-            }
-        } -ArgumentList ([ref]$stream), ([ref]$logger.Queue), $Config.RawLogData
-
-        [Console]::TreatControlCAsInput = $true
-
-        $inputHelpers = [Collections.Generic.Dictionary[ConsoleKey, String]]::new()
-        $inputHelpers.Add("UpArrow", "$([char]27)[A"); $inputHelpers.Add("DownArrow", "$([char]27)[B")
-        $inputHelpers.Add("RightArrow", "$([char]27)[C"); $inputHelpers.Add("LeftArrow", "$([char]27)[D")
-        $inputHelpers.Add("Delete", $([char]127)); $inputHelpers.Add("Backspace", $([char]8))
-        $inputHelpers.Add("Home", "$([char]27)[H"); $inputHelpers.Add("End", "$([char]27)[F")
-        $inputHelpers.Add("PageUp", "$([char]27)[5~"); $inputHelpers.Add("PageDown", "$([char]27)[6~")
-        $inputHelpers.Add("Insert", "$([char]27)[2~")
-
-        Write-Host "--- Telnet Session Started. Press ESC in the console to exit. ---`n" -ForegroundColor Green
-
-        if ($Config.AutoInput) {
-            Write-Host "Sending auto-input..." -ForegroundColor Cyan; Start-Sleep -Seconds 1
-            foreach ($line in $Config.AutoInput.Split("`n")) {
-                $command = $line.Trim() + "`r`n"
-                $bytes = [System.Text.Encoding]::ASCII.GetBytes($command)
-                $stream.Write($bytes, 0, $bytes.Length)
-                if ($logger) { $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = $command }) }
-                Start-Sleep -Milliseconds 200
-            }
-        }
-
-        if ($Config.KeepAlive) {
-            $keepAliveJob = Start-SessionKeepAlive -Stream $stream
-        }
-
-        while ($client.Connected -and $readerJob.State -in @('Running', 'NotStarted')) {
-            if ([Console]::KeyAvailable) {
-                $key = [Console]::ReadKey($true)
-                if ($key.Key -eq 'Escape') { break }
-
-                $output = if ($inputHelpers.ContainsKey($key.Key)) { $inputHelpers[$key.Key] } else { $key.KeyChar }
-                $bytes = [System.Text.Encoding]::ASCII.GetBytes($output)
-                $stream.Write($bytes, 0, $bytes.Length)
-
-                if ($logger) {
-                    $dataToLog = if ($Config.RawLogData) { $output } else { Remove-AnsiEscapeSequences $output }
-                    $logger.Queue.Enqueue([PSCustomObject]@{Source = 'User'; Data = $dataToLog })
-                }
-            }
-            Start-Sleep -Milliseconds 20
-        }
-    }
-    catch { Write-Error "Telnet session failed: $_" }
-    finally {
-        Write-Host "`n--- Telnet Session Closed. ---" -ForegroundColor Yellow
-        if ($keepAliveJob) { Stop-SessionKeepAlive $keepAliveJob }
-        if ($readerJob) { Stop-Job $readerJob | Remove-Job -Force }
-        if ($logger) { Stop-SessionLogger $logger }
-        if ($stream) { $stream.Close() }
-        if ($client) { $client.Close() }
-        [Console]::TreatControlCAsInput = $false
-    }
-}
-
-
-#endregion Session Handlers
-
-#region GUI Function
-
-function Show-ConnectionConfigMenu {
-
-    $consoleHandle = [ConsoleUtils]::GetConsoleWindow()
-    [ConsoleUtils]::ShowWindow($consoleHandle, 0) # Hide console
-
-    $form = New-Object Windows.Forms.Form
-    $form.Text = "Connection Configuration"
-    $form.Size = New-Object Drawing.Size(840, 620) # Adjusted height
-    $form.StartPosition = "CenterScreen"
-    $form.FormBorderStyle = 'FixedDialog'
-
-    # Helper function to create a label and control pair
-    function Add-ControlPair {
-        param($parent, $labelText, $yPos, [ref]$controlRef, $items = $null, $type = "ComboBox", $controlX = 150, $controlWidth = 250)
-        $lbl = New-Object Windows.Forms.Label; $lbl.Text = $labelText; $lbl.Location = New-Object Drawing.Point(10, $yPos); $lbl.AutoSize = $true; $parent.Controls.Add($lbl)
-        
-        $control = switch ($type) {
-            "ComboBox"  { New-Object Windows.Forms.ComboBox }
-            "CheckBox"  { New-Object Windows.Forms.CheckBox }
-            "TextBox"   { New-Object Windows.Forms.TextBox }
-            default     { New-Object Windows.Forms.TextBox }
-        }
-        
-        if ($type -eq "ComboBox") { $control.DropDownStyle = 'DropDownList'; if ($items) { $control.Items.AddRange($items) } }
-
-        $control.Location = New-Object Drawing.Point($controlX, ($yPos - 3)); $control.Size = New-Object Drawing.Size($controlWidth, 20); $parent.Controls.Add($control)
-        $controlRef.Value = $control
-    }
-
-    # --- Main Layout Panels ---
-    $gbProfile = New-Object Windows.Forms.GroupBox; $gbProfile.Text = "Profile"; $gbProfile.Location = New-Object Drawing.Point(10, 10); $gbProfile.Size = New-Object Drawing.Size(805, 60); $form.Controls.Add($gbProfile)
-    $gbType = New-Object Windows.Forms.GroupBox; $gbType.Text = "Connection Type"; $gbType.Location = New-Object Drawing.Point(10, 80); $gbType.Size = New-Object Drawing.Size(390, 60); $form.Controls.Add($gbType)
-    $gbConnSpecific = New-Object Windows.Forms.GroupBox; $gbConnSpecific.Text = "Connection Settings"; $gbConnSpecific.Location = New-Object Drawing.Point(10, 150); $gbConnSpecific.Size = New-Object Drawing.Size(390, 220); $form.Controls.Add($gbConnSpecific)
-    
-    $gbAutoInput = New-Object Windows.Forms.GroupBox; $gbAutoInput.Text = "Auto-Input Script"; $gbAutoInput.Location = New-Object Drawing.Point(10, 380); $gbAutoInput.Size = New-Object Drawing.Size(390, 130); $form.Controls.Add($gbAutoInput)
-    $txtAutoInput = New-Object Windows.Forms.TextBox; $txtAutoInput.Multiline = $true; $txtAutoInput.ScrollBars = 'Vertical'; $txtAutoInput.AcceptsReturn = $true; $txtAutoInput.Location = New-Object Drawing.Point(15, 25); $txtAutoInput.Size = New-Object Drawing.Size(360, 90); $gbAutoInput.Controls.Add($txtAutoInput)
-
-    $gbCommon = New-Object Windows.Forms.GroupBox; $gbCommon.Text = "Terminal & Logging Settings"; $gbCommon.Location = New-Object Drawing.Point(425, 80); $gbCommon.Size = New-Object Drawing.Size(390, 430); $form.Controls.Add($gbCommon)
-
-    # --- Profile Controls ---
-    $cbProfiles = $null; Add-ControlPair $gbProfile "Select Profile" 25 ([ref]$cbProfiles) (Get-ProfileList) "ComboBox" 100 200
-    $cbProfiles.DropDownStyle = 'DropDown' # Allow typing new profile names
-    $btnSaveProfile = New-Object Windows.Forms.Button; $btnSaveProfile.Text = "Save"; $btnSaveProfile.Location = New-Object Drawing.Point(310, 22); $gbProfile.Controls.Add($btnSaveProfile)
-    $btnDeleteProfile = New-Object Windows.Forms.Button; $btnDeleteProfile.Text = "Delete"; $btnDeleteProfile.Location = New-Object Drawing.Point(390, 22); $gbProfile.Controls.Add($btnDeleteProfile)
-
-    # --- Connection Type Controls ---
-    $rbSerial = New-Object Windows.Forms.RadioButton; $rbSerial.Text = "Serial"; $rbSerial.Location = New-Object Drawing.Point(20, 25); $rbSerial.AutoSize = $true; $gbType.Controls.Add($rbSerial)
-    $rbSsh = New-Object Windows.Forms.RadioButton; $rbSsh.Text = "SSH"; $rbSsh.Location = New-Object Drawing.Point(140, 25); $rbSsh.AutoSize = $true; $gbType.Controls.Add($rbSsh)
-    $rbTelnet = New-Object Windows.Forms.RadioButton; $rbTelnet.Text = "Telnet"; $rbTelnet.Location = New-Object Drawing.Point(260, 25); $rbTelnet.AutoSize = $true; $gbType.Controls.Add($rbTelnet)
-
-    # --- Connection-Specific Panels (to be placed inside $gbConnSpecific) ---
-    $pnlSerial = New-Object Windows.Forms.Panel; $pnlSerial.Dock = 'Fill'; $gbConnSpecific.Controls.Add($pnlSerial)
-    $pnlSsh = New-Object Windows.Forms.Panel; $pnlSsh.Dock = 'Fill'; $pnlSsh.Visible = $false; $gbConnSpecific.Controls.Add($pnlSsh)
-    $pnlTelnet = New-Object Windows.Forms.Panel; $pnlTelnet.Dock = 'Fill'; $pnlTelnet.Visible = $false; $gbConnSpecific.Controls.Add($pnlTelnet)
-
-    # Serial Controls
-    $serialY = 25; $cbPort = $null; Add-ControlPair $pnlSerial "COM Port" $serialY ([ref]$cbPort) ([System.IO.Ports.SerialPort]::GetPortNames()) "ComboBox" 120 250
-    $serialY += 30; $cbBaud = $null; Add-ControlPair $pnlSerial "Baud Rate" $serialY ([ref]$cbBaud) @("9600", "19200", "38400", "57600", "115200") "ComboBox" 120 250
-    $serialY += 30; $cbDataBits = $null; Add-ControlPair $pnlSerial "Data Bits" $serialY ([ref]$cbDataBits) @("8", "7") "ComboBox" 120 250
-    $serialY += 30; $cbParity = $null; Add-ControlPair $pnlSerial "Parity" $serialY ([ref]$cbParity) ([enum]::GetNames([System.IO.Ports.Parity])) "ComboBox" 120 250
-    $serialY += 30; $cbStopBits = $null; Add-ControlPair $pnlSerial "Stop Bits" $serialY ([ref]$cbStopBits) ([enum]::GetNames([System.IO.Ports.StopBits])) "ComboBox" 120 250
-    $serialY += 30; $cbHandshake = $null; Add-ControlPair $pnlSerial "Handshake" $serialY ([ref]$cbHandshake) ([enum]::GetNames([System.IO.Ports.Handshake])) "ComboBox" 120 250
-
-    # SSH Controls
-    $sshY = 25; $txtSshHost = $null; Add-ControlPair $pnlSsh "Host / IP" $sshY ([ref]$txtSshHost) $null "TextBox" 120 250
-    $sshY += 30; $txtSshUser = $null; Add-ControlPair $pnlSsh "Username" $sshY ([ref]$txtSshUser) $null "TextBox" 120 250
-    $sshY += 30; $txtSshPort = $null; Add-ControlPair $pnlSsh "Port" $sshY ([ref]$txtSshPort) $null "TextBox" 120 250
-
-    # Telnet Controls
-    $telnetY = 25; $txtTelnetHost = $null; Add-ControlPair $pnlTelnet "Host / IP" $telnetY ([ref]$txtTelnetHost) $null "TextBox" 120 250
-    $telnetY += 30; $txtTelnetPort = $null; Add-ControlPair $pnlTelnet "Port" $telnetY ([ref]$txtTelnetPort) $null "TextBox" 120 250
-
-    # --- Common Settings Controls ---
-    $commonY = 25; $allColors = [System.Enum]::GetNames([System.ConsoleColor])
-    $cbTextColor = $null; Add-ControlPair $gbCommon "Text Color" $commonY ([ref]$cbTextColor) $allColors "ComboBox" 160 200
-    $commonY += 30; $cbBgColor = $null; Add-ControlPair $gbCommon "Background Color" $commonY ([ref]$cbBgColor) $allColors "ComboBox" 160 200
-    $commonY += 30; $cbCursorSize = $null; Add-ControlPair $gbCommon "Cursor Size" $commonY ([ref]$cbCursorSize) @("Normal", "Small", "Large") "ComboBox" 160 200
-    $commonY += 35; $chkForceColors = $null; Add-ControlPair $gbCommon "Force Terminal Colors" $commonY ([ref]$chkForceColors) $null "CheckBox" 160 20
-    $commonY += 30; $chkKeepAlive = $null; Add-ControlPair $gbCommon "Send Keep-Alive" $commonY ([ref]$chkKeepAlive) $null "CheckBox" 160 20
-    
-    $commonY += 40 # Spacer for logging section
-    
-    # Logging Controls
-    $chkBackgroundLogging = $null; Add-ControlPair $gbCommon "Enable Logging" $commonY ([ref]$chkBackgroundLogging) $null "CheckBox" 160 20
-    $commonY += 30; $txtLogFilePath = $null; Add-ControlPair $gbCommon "Log File Path" $commonY ([ref]$txtLogFilePath) $null "TextBox" 160 200
-    $btnBrowseLog = New-Object Windows.Forms.Button; $btnBrowseLog.Text = "..."; $btnBrowseLog.Location = New-Object Drawing.Point(365, ($commonY - 4)); $btnBrowseLog.Size = New-Object Drawing.Size(20, 24); $gbCommon.Controls.Add($btnBrowseLog)
-    $commonY += 30; $chkRawLogData = $null; Add-ControlPair $gbCommon "Log Raw Stream Data" $commonY ([ref]$chkRawLogData) $null "CheckBox" 160 20
-    $commonY += 30; $chkObfuscate = $null; Add-ControlPair $gbCommon "Obfuscate Passwords" $commonY ([ref]$chkObfuscate) $null "CheckBox" 160 20
-
-    # --- Bottom Buttons ---
-    $btnConnect = New-Object Windows.Forms.Button; $btnConnect.Text = "Connect"; $btnConnect.DialogResult = [Windows.Forms.DialogResult]::OK; $btnConnect.Location = New-Object Drawing.Point(320, 530); $btnConnect.Size = New-Object Drawing.Size(100, 40); $form.Controls.Add($btnConnect)
-    $btnCancel = New-Object Windows.Forms.Button; $btnCancel.Text = "Cancel"; $btnCancel.DialogResult = [Windows.Forms.DialogResult]::Cancel; $btnCancel.Location = New-Object Drawing.Point(430, 530); $btnCancel.Size = New-Object Drawing.Size(100, 40); $form.Controls.Add($btnCancel)
-
-    # --- Event Handlers & Logic ---
-    $UpdateFormForType = {
-        $pnlSerial.Visible = $rbSerial.Checked
-        $pnlSsh.Visible = $rbSsh.Checked
-        $pnlTelnet.Visible = $rbTelnet.Checked
-    }
-    $rbSerial.add_CheckedChanged($UpdateFormForType); $rbSsh.add_CheckedChanged($UpdateFormForType); $rbTelnet.add_CheckedChanged($UpdateFormForType)
-
-    $LoadProfileIntoForm = {
-        param($profile)
-        if (!$profile) { return }
-        switch ($profile.Type) {
-            "Serial" { $rbSerial.Checked = $true }
-            "SSH"    { $rbSsh.Checked = $true }
-            "Telnet" { $rbTelnet.Checked = $true }
-        }
-        $cbPort.Text = $profile.COMPort; $cbBaud.Text = $profile.BaudRate; $cbDataBits.Text = $profile.DataBits; $cbParity.Text = $profile.Parity; $cbStopBits.Text = $profile.StopBits; $cbHandshake.Text = $profile.Handshake
-        $txtSshHost.Text = $profile.Host; $txtSshUser.Text = $profile.User; $txtSshPort.Text = $profile.SshPort
-        $txtTelnetHost.Text = $profile.Host; $txtTelnetPort.Text = $profile.TelnetPort
-        $cbTextColor.Text = $profile.TextColor; $cbBgColor.Text = $profile.BackgroundColor; $cbCursorSize.Text = $profile.CursorSize
-        $chkForceColors.Checked = $profile.ForceTerminalColors
-        $chkKeepAlive.Checked = $profile.KeepAlive
-        $txtAutoInput.Text = $profile.AutoInput
-        $chkBackgroundLogging.Checked = $profile.BackgroundLogging; $txtLogFilePath.Text = $profile.LogFilePath; $chkRawLogData.Checked = $profile.RawLogData; $chkObfuscate.Checked = $profile.ObfuscatePasswords
-    }
-
-    $cbProfiles.add_SelectedIndexChanged({ $LoadProfileIntoForm.Invoke((Import-Profile $cbProfiles.Text)) })
-    $btnSaveProfile.add_Click({
-        $profileName = $cbProfiles.Text
-        if ([string]::IsNullOrWhiteSpace($profileName)) { [Windows.Forms.MessageBox]::Show("Please enter a profile name.", "Error", "OK", "Error"); return }
-        $config = [PSCustomObject]@{
-            Name                = $profileName
-            Type                = if ($rbSerial.Checked) { "Serial" } elseif ($rbSsh.Checked) { "SSH" } else { "Telnet" }
-            COMPort             = $cbPort.Text
-            BaudRate            = $cbBaud.Text
-            DataBits            = $cbDataBits.Text
-            Parity              = $cbParity.Text
-            StopBits            = $cbStopBits.Text
-            Handshake           = $cbHandshake.Text
-            Host                = if ($rbSsh.Checked) { $txtSshHost.Text } elseif ($rbTelnet.Checked) { $txtTelnetHost.Text } else { $txtSshHost.Text }
-            User                = $txtSshUser.Text
-            SshPort             = $txtSshPort.Text
-            TelnetPort          = $txtTelnetPort.Text
-            TextColor           = $cbTextColor.Text
-            BackgroundColor     = $cbBgColor.Text
-            CursorSize          = $cbCursorSize.Text
-            ForceTerminalColors = $chkForceColors.Checked
-            KeepAlive           = $chkKeepAlive.Checked
-            AutoInput           = $txtAutoInput.Text
-            BackgroundLogging   = $chkBackgroundLogging.Checked
-            LogFilePath         = $txtLogFilePath.Text
-            RawLogData          = $chkRawLogData.Checked
-            ObfuscatePasswords  = $chkObfuscate.Checked
-        }
-        Save-Profile $profileName $config
-        [Windows.Forms.MessageBox]::Show("Profile '$profileName' saved.", "Success", "OK", "Information")
-        
-        # BUGFIX: Clear and reload the profile list from the source of truth (JSON file).
-        $cbProfiles.Items.Clear()
-        $cbProfiles.Items.AddRange((Get-ProfileList))
-        $cbProfiles.Text = $profileName
-    })
-
-	$btnDeleteProfile.add_Click({
-		$profileName = $cbProfiles.Text
-
-		if ([string]::IsNullOrWhiteSpace($profileName)) {
-			[Windows.Forms.MessageBox]::Show("Please select a profile to delete.", "Error", "OK", "Error")
-			return
-		}
-
-		$confirm = [Windows.Forms.MessageBox]::Show(
-			"Are you sure you want to delete profile '$profileName'?",
-			"Confirm Delete",
-			[Windows.Forms.MessageBoxButtons]::YesNo,
-			[Windows.Forms.MessageBoxIcon]::Question
-		)
-
-		if ($confirm -eq [Windows.Forms.DialogResult]::Yes) {
-			if ($ProfilesFile -and (Test-Path $ProfilesFile)) {
-				$profiles = @(Get-Content -Raw -Path $ProfilesFile | ConvertFrom-Json)
-				$profiles = $profiles | Where-Object { $_.Name -ne $profileName }
-				$profiles | ConvertTo-Json -Depth 5 | Set-Content -Path $ProfilesFile -Encoding UTF8
-			}
-
-			# Remove from UI
-			$cbProfiles.Items.Remove($profileName)
-			$cbProfiles.Text = ""
-			[Windows.Forms.MessageBox]::Show("Profile '$profileName' deleted.", "Success", "OK", "Information")
-		}
-	})
-
-    $btnBrowseLog.add_Click({
-        $saveFileDialog = New-Object Windows.Forms.SaveFileDialog
-        $saveFileDialog.Filter = "Log Files (*.log)|*.log|All Files (*.*)|*.*"
-        if ($saveFileDialog.ShowDialog() -eq "OK") {
-            $txtLogFilePath.Text = $saveFileDialog.FileName
-        }
-    })
-
-    # Initial load
-    $LoadProfileIntoForm.Invoke((Import-Profile "Default-SSH"))
-    $cbProfiles.Text = "Default-SSH"
-
-    $form.Add_Shown({ $form.Activate() })
-    $result = $form.ShowDialog()
-
-    if ($result -eq [Windows.Forms.DialogResult]::OK) {
-        # Construct config object from form state to pass to session handler
-        $global:ConnectionConfig = [PSCustomObject]@{
-            Name                = $cbProfiles.Text
-            Type                = if ($rbSerial.Checked) { "Serial" } elseif ($rbSsh.Checked) { "SSH" } else { "Telnet" }
-            COMPort             = $cbPort.Text
-            BaudRate            = [int]$cbBaud.Text
-            DataBits            = [int]$cbDataBits.Text
-            Parity              = $cbParity.Text
-            StopBits            = $cbStopBits.Text
-            Handshake           = $cbHandshake.Text
-            RTSEnable           = $false # This was not in the GUI, setting a default
-            Host                = if ($rbSsh.Checked) { $txtSshHost.Text } elseif ($rbTelnet.Checked) { $txtTelnetHost.Text } else { "" }
-            User                = $txtSshUser.Text
-            SshPort             = [int]$txtSshPort.Text
-            TelnetPort          = [int]$txtTelnetPort.Text
-            TextColor           = $cbTextColor.Text
-            BackgroundColor     = $cbBgColor.Text
-            CursorSize          = $cbCursorSize.Text
-            ForceTerminalColors = $chkForceColors.Checked
-            KeepAlive           = $chkKeepAlive.Checked
-            AutoInput           = $txtAutoInput.Text.Replace("`r`n", "`n")
-            BackgroundLogging   = $chkBackgroundLogging.Checked
-            LogFilePath         = $txtLogFilePath.Text
-            RawLogData          = $chkRawLogData.Checked
-            ObfuscatePasswords  = $chkObfuscate.Checked
-        }
-    }
-    
-    [ConsoleUtils]::ShowWindow($consoleHandle, 5) # Show console
-    $form.Dispose()
-    return $result
-}
-
-#endregion GUI Function
-
-
-# --- Main Script Execution ---
-while ($true) {
-    # Clear-Host # Optional: uncomment to clear screen between sessions
-    $global:ConnectionConfig = $null
-    $dialogResult = Show-ConnectionConfigMenu
-
-    if ($dialogResult -ne [Windows.Forms.DialogResult]::OK -or !$global:ConnectionConfig) {
-        Write-Host "Operation cancelled. Exiting." -ForegroundColor Yellow
-        break
-    }
-
-    Clear-Host
-    $config = $global:ConnectionConfig
-
-    # Set console properties
-    $Host.UI.RawUI.WindowTitle = "$($config.Type) Session - $($config.Host)$($config.COMPort)"
-    switch ($config.CursorSize) {
-        "Small" { $Host.UI.RawUI.CursorSize = 25 }
-        "Large" { $Host.UI.RawUI.CursorSize = 100 }
-        default { $Host.UI.RawUI.CursorSize = 50 } # Normal
-    }
-
-    try {
-        switch ($config.Type) {
-            "Serial" {
-                if ([string]::IsNullOrWhiteSpace($config.COMPort)) { throw "No COM Port selected." }
-                $port = New-Object System.IO.Ports.SerialPort($config.COMPort, $config.BaudRate, $config.Parity, $config.DataBits, $config.StopBits)
-                $port.Handshake = $config.Handshake
-                $port.Open()
-                Start-SerialSession -Port $port -Config $config
-                $port.Close()
-            }
-            "SSH" {
-                Start-SshSession -Config $config
-            }
-            "Telnet" {
-                Start-TelnetSession -Config $config
-            }
-        }
-    }
-    catch {
-        Write-Error "Failed to start session: $_"
-        Read-Host "Press Enter to return to the menu."
-    }
-
-    $choice = Read-Host "`nSession ended. Start a new connection? (Y/N)"
-    if ($choice -ne 'y') {
-        break
-    }
-}
-
-Write-Host "Script finished."
+[System.Windows.Forms.Application]::Run($form)

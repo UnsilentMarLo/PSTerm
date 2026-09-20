@@ -66,6 +66,7 @@ namespace PSTerm.Render
         private int _cellWidth = 8;
         private int _cellHeight = 16;
         private int _baselineOffset;
+        private bool _metricsValid;
 
         // ---- painting -------------------------------------------------------
         private readonly Timer _renderTimer;
@@ -87,6 +88,7 @@ namespace PSTerm.Render
 
         // ---- cursor ---------------------------------------------------------
         private bool _cursorOn = true;
+        private int _paintedCursorRow = -1;
         private readonly Timer _blinkTimer;
         private bool _hostFocused;
 
@@ -108,8 +110,10 @@ namespace PSTerm.Render
             TabStop = true;
             BackColor = _palette.Background;
 
-            SetFont(new Font("Consolas", 10.5f, FontStyle.Regular, GraphicsUnit.Point));
-
+            // Order matters. SetFont measures text, measuring can realise the
+            // window handle, and OnHandleCreated calls straight back into
+            // RecalculateGrid - so the emulator and the scroll bar have to exist
+            // before the first call that might create a handle.
             _term = new TerminalEmulator(80, 24, 5000);
             HookEmulator(_term);
 
@@ -118,6 +122,8 @@ namespace PSTerm.Render
             _scrollBar.Visible = false;
             _scrollBar.ValueChanged += OnScrollBarChanged;
             Controls.Add(_scrollBar);
+
+            SetFont(new Font("Consolas", 10.5f, FontStyle.Regular, GraphicsUnit.Point));
 
             _renderTimer = new Timer();
             _renderTimer.Interval = 16;          // ~60 fps ceiling
@@ -199,6 +205,7 @@ namespace PSTerm.Render
 
             DisposeFonts();
             _font = font;
+            _metricsValid = false;
             _boldFont = new Font(font, FontStyle.Bold);
             _italicFont = new Font(font, FontStyle.Italic);
             _boldItalicFont = new Font(font, FontStyle.Bold | FontStyle.Italic);
@@ -278,31 +285,76 @@ namespace PSTerm.Render
         {
             if (string.IsNullOrEmpty(text)) return;
             EventHandler<TerminalInputEventArgs> h = Input;
-            if (h != null) h(this, new TerminalInputEventArgs(text));
+            if (h == null) return;
+
+            // Keystrokes arrive on the UI thread and are sent straight through.
+            // Terminal replies (device attributes, cursor position reports) do not:
+            // they are produced inside Feed(), on the transport's reader thread.
+            // Handlers may be PowerShell script blocks, which cannot run on a
+            // thread with no runspace - the session would hang rather than answer.
+            if (InvokeRequired)
+            {
+                BeginInvokeSafe(new MethodInvoker(delegate
+                {
+                    EventHandler<TerminalInputEventArgs> inner = Input;
+                    if (inner != null) inner(this, new TerminalInputEventArgs(text));
+                }));
+                return;
+            }
+
+            h(this, new TerminalInputEventArgs(text));
         }
 
         // =====================================================================
         // Metrics and layout
         // =====================================================================
 
+        /// <summary>
+        /// Work out the cell size from the font.
+        ///
+        /// This has to be measured against the same device context the text is
+        /// later drawn into. A run of cells is drawn as a single string and relies
+        /// on the font's own advance carrying each glyph to the next cell, so if
+        /// the measured width and the drawn advance disagree the columns drift:
+        /// measuring without a Graphics picks up the system DPI rather than the
+        /// control's, which on a scaled display gave a cell twice as wide as the
+        /// glyphs and put the cursor in the wrong column.
+        ///
+        /// The control has no handle during construction, so measurement is
+        /// deferred and redone at first paint.
+        /// </summary>
         private void MeasureCell()
         {
-            using (Graphics g = CreateGraphics())
+            if (_font == null) return;
+
+            TextFormatFlags flags = TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix;
+            Size proposed = new Size(short.MaxValue, short.MaxValue);
+            Size size;
+
+            if (IsHandleCreated)
             {
-                // A monospace cell is measured from a wide glyph with padding
-                // suppressed; MeasureString would include GDI+ layout slack and
-                // produce cells that drift out of alignment across the row.
-                Size size = TextRenderer.MeasureText(g, "W", _font, new Size(short.MaxValue, short.MaxValue),
-                                                     TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
-                _cellWidth = Math.Max(1, size.Width);
-                _cellHeight = Math.Max(1, _font.Height);
-                _baselineOffset = 0;
+                using (Graphics g = CreateGraphics())
+                {
+                    size = TextRenderer.MeasureText(g, "W", _font, proposed, flags);
+                    _cellHeight = Math.Max(1, (int)Math.Ceiling(_font.GetHeight(g)));
+                }
+                _metricsValid = true;
             }
+            else
+            {
+                // Provisional only; corrected once there is a real device context.
+                size = TextRenderer.MeasureText("W", _font, proposed, flags);
+                _cellHeight = Math.Max(1, _font.Height);
+                _metricsValid = false;
+            }
+
+            _cellWidth = Math.Max(1, size.Width);
+            _baselineOffset = 0;
         }
 
         private void RecalculateGrid()
         {
-            if (_cellWidth <= 0 || _cellHeight <= 0) return;
+            if (_term == null || _cellWidth <= 0 || _cellHeight <= 0) return;
 
             int usableWidth = ClientSize.Width - (_scrollBar != null && _scrollBar.Visible ? _scrollBar.Width : 0);
             int cols = Math.Max(1, usableWidth / _cellWidth);
@@ -346,7 +398,7 @@ namespace PSTerm.Render
 
         private void UpdateScrollBar()
         {
-            if (_scrollBar == null) return;
+            if (_scrollBar == null || _term == null) return;
 
             int history;
             lock (_sync) { history = _term.IsAlternateScreen ? 0 : _term.Primary.HistoryCount; }
@@ -456,7 +508,7 @@ namespace PSTerm.Render
 
         private void OnBlinkTick(object sender, EventArgs e)
         {
-            if (!_hostFocused) return;
+            if (!_hostFocused || _term == null) return;
             bool visible;
             lock (_sync) { visible = _term.CursorVisible; }
             if (!visible) return;
@@ -466,10 +518,12 @@ namespace PSTerm.Render
 
         private void InvalidateCursorRow()
         {
-            int y;
-            lock (_sync) { y = _term.CursorY; }
-            int top = (y - _scrollOffset) * _cellHeight;
-            Invalidate(new Rectangle(0, top, ClientSize.Width, _cellHeight));
+            lock (_sync)
+            {
+                if (_term == null) return;
+                _term.Screen.MarkDirty(_term.CursorY);
+            }
+            _needsPaint = true;
         }
 
         private void InvalidateAll()
@@ -497,6 +551,17 @@ namespace PSTerm.Render
 
         protected override void OnPaint(PaintEventArgs e)
         {
+            if (_term == null || _font == null) return;
+
+            // The handle exists by now, so any provisional metrics taken during
+            // construction can be replaced with correctly scaled ones.
+            if (!_metricsValid)
+            {
+                MeasureCell();
+                RecalculateGrid();
+                _backBufferValid = false;
+            }
+
             int width = ClientSize.Width;
             int height = ClientSize.Height;
             if (width <= 0 || height <= 0) return;
@@ -541,6 +606,13 @@ namespace PSTerm.Render
                         g.FillRectangle(bg, 0, 0, ClientSize.Width, ClientSize.Height);
                 }
 
+                // The row the cursor was last drawn on must be repainted even when
+                // the model did not change there, or the block it left behind
+                // stays on the back buffer.
+                if (_paintedCursorRow >= 0 && _paintedCursorRow != _term.CursorY)
+                    screen.MarkDirty(_paintedCursorRow);
+                screen.MarkDirty(_term.CursorY);
+
                 for (int row = 0; row < rows; row++)
                 {
                     if (!full && !screen.IsDirty(row) && _scrollOffset == 0) continue;
@@ -558,7 +630,14 @@ namespace PSTerm.Render
                 // The cursor is drawn last so it sits on top of the cell it occupies,
                 // and only when the live view is showing.
                 if (_scrollOffset == 0 && _term.CursorVisible && (_cursorOn || !_hostFocused))
+                {
                     RenderCursor(g, reversed);
+                    _paintedCursorRow = _term.CursorY;
+                }
+                else
+                {
+                    _paintedCursorRow = -1;
+                }
             }
         }
 
@@ -610,6 +689,17 @@ namespace PSTerm.Render
 
                 Color fore, back;
                 ResolveAt(line, abs, c, reversed, out fore, out back);
+
+                // Box-drawing and block characters are drawn geometrically rather
+                // than as glyphs, so their strokes meet exactly at cell edges. A
+                // font's glyphs are built for the em box, not the terminal cell,
+                // and leave hairline gaps in every table a device draws.
+                if (BoxDrawing.IsBoxDrawing(cell.Ch))
+                {
+                    Rectangle box = new Rectangle(c * _cellWidth, y, _cellWidth, _cellHeight);
+                    if (BoxDrawing.Draw(g, cell.Ch, box, fore)) { c++; continue; }
+                }
+
                 Font font = FontFor(cell.Flags);
 
                 int start = c;
@@ -622,6 +712,7 @@ namespace PSTerm.Render
                 {
                     Cell next = line.Cells[c];
                     if ((next.Flags & CellFlags.WideTrail) != 0) { c++; continue; }
+                    if (BoxDrawing.IsBoxDrawing(next.Ch)) break;
 
                     Color f2, b2;
                     ResolveAt(line, abs, c, reversed, out f2, out b2);
