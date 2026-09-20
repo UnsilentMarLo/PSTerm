@@ -32,6 +32,8 @@ function New-PSTermMainWindow {
         Tree        = $null
         SearchBox   = $null
         QuickBox    = $null
+        TreeScroll  = $null
+        TreeHost    = $null
         Status      = $null
         StatusLeft  = $null
         StatusRight = $null
@@ -143,15 +145,26 @@ function New-PSTermMainWindow {
     Set-PSTermPlaceholder -TextBox $searchBox -Theme $state.Theme -Text 'Search sessions'
     $searchHost.Controls.Add($searchBox)
 
-    $tree = New-Object System.Windows.Forms.TreeView
-    $tree.Dock = 'Fill'
-    $tree.HideSelection = $false
-    $tree.ShowLines = $false
-    $tree.ShowRootLines = $false
-    $tree.ShowPlusMinus = $true
+    # ThemedTreeView: TreeView paints its selection bar, expander glyphs and
+    # scroll bars with the system visual style and ignores BackColor.
+    $treeHost = New-Object PSTerm.Render.ThemedPanel
+    $treeHost.Dock = 'Fill'
+
+    $treeScroll = New-Object PSTerm.Render.ThinScrollBar
+    $treeScroll.Dock = 'Right'
+    $treeScroll.Width = [int](12 * $scale)
+    $treeScroll.Visible = $false
+
+    $tree = New-Object PSTerm.Render.ThemedTreeView
     $tree.ItemHeight = [int]($form.Font.Height * 1.55)
-    $tree.FullRowSelect = $true
+    $tree.Indent = [int]($form.Font.Height * 1.1)
+    $tree.Font = New-PSTermFont
     $state.Tree = $tree
+    $state.TreeScroll = $treeScroll
+    $state.TreeHost = $treeHost
+
+    $treeHost.Controls.Add($tree)
+    $treeHost.Controls.Add($treeScroll)
 
     $treeButtons = New-Object System.Windows.Forms.FlowLayoutPanel
     $treeButtons.Dock = 'Bottom'
@@ -172,7 +185,7 @@ function New-PSTermMainWindow {
 
     # Order matters for docking: Fill is added first so Top and Bottom take their
     # space from the edges rather than overlapping it.
-    $sidePanel.Controls.Add($tree)
+    $sidePanel.Controls.Add($treeHost)
     $sidePanel.Controls.Add($searchHost)
     $sidePanel.Controls.Add($treeButtons)
     $split.Panel1.Controls.Add($sidePanel)
@@ -261,6 +274,17 @@ function New-PSTermMainWindow {
 
     $searchBox.Add_TextChanged({ Update-PSTermTree -State $state }.GetNewClosure())
 
+    $treeHost.Add_Resize({ Update-PSTermTreeScroll -State $state }.GetNewClosure())
+    $treeScroll.Add_ValueChanged({
+        if ($state.Tree.TopNodeIndex -ne $treeScroll.Value) { $state.Tree.TopNodeIndex = $treeScroll.Value }
+    }.GetNewClosure())
+    # The tree scrolls itself on the wheel and on arrow keys, so the bar is
+    # refreshed from the tree rather than trying to intercept every path.
+    $tree.Add_MouseWheel({ Update-PSTermTreeScroll -State $state }.GetNewClosure())
+    $tree.Add_AfterSelect({ Update-PSTermTreeScroll -State $state }.GetNewClosure())
+    $tree.Add_AfterExpand({ Update-PSTermTreeScroll -State $state }.GetNewClosure())
+    $tree.Add_AfterCollapse({ Update-PSTermTreeScroll -State $state }.GetNewClosure())
+
     $tree.Add_NodeMouseDoubleClick({
         param($sender, $e)
         $id = $e.Node.Tag
@@ -324,6 +348,9 @@ function Apply-PSTermTheme {
     $State.Status.ForeColor = $theme.TextMuted
     foreach ($item in $State.Status.Items) { $item.ForeColor = $theme.TextMuted }
 
+    $controlTheme = New-PSTermControlTheme -Theme $theme
+    $State.Tree.ApplyTheme($controlTheme)
+    $State.TreeScroll.ApplyTheme($controlTheme)
     Set-PSTermTabStripTheme -Strip $State.TabStrip -Theme $theme
     Set-PSTermTitleBarTheme -Form $State.Form -Dark ($theme.Mode -eq 'Dark')
     $State.Form.Invalidate($true)
@@ -386,6 +413,7 @@ function Update-PSTermTree {
         }
 
         $tree.ExpandAll()
+        Update-PSTermTreeScroll -State $State
 
         if ($selectedId) {
             $match = Find-PSTermTreeNode -Nodes $tree.Nodes -Id $selectedId
@@ -394,6 +422,40 @@ function Update-PSTermTree {
     }
     finally {
         $tree.EndUpdate()
+    }
+}
+
+function Update-PSTermTreeScroll {
+    <#
+    .SYNOPSIS
+        Size the tree so its own scroll bar is clipped out of view, and drive the
+        themed one in its place.
+    #>
+    param([Parameter(Mandatory)]$State)
+
+    $tree = $State.Tree
+    $bar = $State.TreeScroll
+    $host_ = $State.TreeHost
+    if (-not $tree -or -not $bar -or -not $host_) { return }
+
+    $total = $tree.VisibleNodeCount
+    $perPage = $tree.RowsPerPage
+    $needed = $total -gt $perPage
+
+    if ($bar.Visible -ne $needed) { $bar.Visible = $needed }
+
+    # The system scroll bar is pushed past the right edge of the clipping panel.
+    $systemWidth = [System.Windows.Forms.SystemInformation]::VerticalScrollBarWidth
+    $barWidth = if ($needed) { $bar.Width } else { 0 }
+    $tree.SetBounds(0, 0, ($host_.ClientSize.Width - $barWidth + $systemWidth), $host_.ClientSize.Height)
+    # Tell the tree where the visible edge is, so labels ellipsise on screen
+    # rather than in the clipped-away strip.
+    $tree.RightInset = $systemWidth
+
+    if ($needed) {
+        $bar.Maximum = [Math]::Max(0, $total - 1)
+        $bar.LargeChange = $perPage
+        $bar.Value = $tree.TopNodeIndex
     }
 }
 
@@ -659,13 +721,10 @@ function Close-PSTermTab {
     $tab = $State.Tabs | Where-Object { $_.Item -eq $item } | Select-Object -First 1
 
     if ($tab -and -not $tab.Closed -and -not $Force) {
-        $answer = [System.Windows.Forms.MessageBox]::Show(
-            $State.Form,
-            "'$($item.Title)' is still connected. Close it?",
-            'Close session',
-            [System.Windows.Forms.MessageBoxButtons]::YesNo,
-            [System.Windows.Forms.MessageBoxIcon]::Question)
-        if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+        $answer = Show-PSTermMessage -Theme $State.Theme -Owner $State.Form `
+            -Title 'Close session' -Buttons YesNo `
+            -Message "'$($item.Title)' is still connected. Close it?"
+        if ($answer -ne 'Yes') { return }
     }
 
     if ($tab) {
@@ -685,13 +744,10 @@ function Confirm-PSTermClose {
 
     $live = @($State.Tabs | Where-Object { -not $_.Closed })
     if ($live.Count -gt 0) {
-        $answer = [System.Windows.Forms.MessageBox]::Show(
-            $State.Form,
-            "$($live.Count) session(s) are still connected. Exit PSTerm?",
-            'Exit',
-            [System.Windows.Forms.MessageBoxButtons]::YesNo,
-            [System.Windows.Forms.MessageBoxIcon]::Question)
-        if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return $false }
+        $answer = Show-PSTermMessage -Theme $State.Theme -Owner $State.Form `
+            -Title 'Exit' -Buttons YesNo `
+            -Message "$($live.Count) session(s) are still connected. Exit PSTerm?"
+        if ($answer -ne 'Yes') { return $false }
     }
 
     foreach ($tab in @($State.Tabs)) {

@@ -340,6 +340,216 @@ namespace PSTerm.Render
     }
 
     // =========================================================================
+    // Tree view
+    // =========================================================================
+
+    /// <summary>
+    /// A tree drawn in theme colours.
+    /// </summary>
+    /// <remarks>
+    /// TreeView paints its selection highlight, expander glyphs and scroll bars
+    /// with the system visual style and ignores BackColor, so a dark panel ends
+    /// up with a white selection bar and a white scroll bar. Everything inside
+    /// the client area is drawn here; the horizontal scroll bar is suppressed
+    /// outright with TVS_NOHSCROLL and long labels are ellipsised instead, which
+    /// is better behaviour for a session list anyway.
+    /// </remarks>
+    public class ThemedTreeView : TreeView
+    {
+        private const int TVS_NOHSCROLL = 0x8000;
+
+        private ControlTheme _theme = new ControlTheme();
+        private TreeNode _hotNode;
+
+        /// <summary>
+        /// Pixels at the right that are clipped from view.
+        /// </summary>
+        /// <remarks>
+        /// The host makes this control wider than its container so the system
+        /// vertical scroll bar, which cannot be themed, falls outside the clip.
+        /// Text has to be laid out against the visible edge or the ellipsis is
+        /// placed off-screen and labels simply end mid-word.
+        /// </remarks>
+        public int RightInset = 0;
+
+        public ThemedTreeView()
+        {
+            DrawMode = TreeViewDrawMode.OwnerDrawAll;
+            FullRowSelect = true;
+            HideSelection = false;
+            ShowLines = false;
+            ShowRootLines = false;
+            ShowPlusMinus = true;      // keeps the native hit-test for the expander
+            BorderStyle = BorderStyle.None;
+            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                CreateParams cp = base.CreateParams;
+                cp.Style |= TVS_NOHSCROLL;
+                return cp;
+            }
+        }
+
+        public void ApplyTheme(ControlTheme theme)
+        {
+            if (theme == null) return;
+            _theme = theme;
+            BackColor = theme.Surface;
+            ForeColor = theme.Text;
+            LineColor = theme.Border;
+            Invalidate();
+        }
+
+        protected override void OnMouseMove(MouseEventArgs e)
+        {
+            base.OnMouseMove(e);
+            TreeNode node = GetNodeAt(0, e.Y);
+            if (!ReferenceEquals(node, _hotNode))
+            {
+                _hotNode = node;
+                Invalidate();
+            }
+        }
+
+        protected override void OnMouseLeave(EventArgs e)
+        {
+            base.OnMouseLeave(e);
+            if (_hotNode != null) { _hotNode = null; Invalidate(); }
+        }
+
+        protected override void OnDrawNode(DrawTreeNodeEventArgs e)
+        {
+            e.DrawDefault = false;
+
+            if (e.Node == null || e.Bounds.Height <= 0) return;
+
+            // Full-width row, so selection spans the panel rather than hugging
+            // the text the way the default drawing does.
+            Rectangle row = new Rectangle(0, e.Bounds.Top, Width - RightInset, e.Bounds.Height);
+
+            bool selected = (e.State & TreeNodeStates.Selected) != 0;
+            bool hot = ReferenceEquals(e.Node, _hotNode);
+            bool isFolder = (e.Node.Tag == null);
+
+            Color back = selected ? _theme.Selection : (hot ? _theme.FieldHover : _theme.Surface);
+            using (SolidBrush brush = new SolidBrush(back))
+                e.Graphics.FillRectangle(brush, row);
+
+            int indent = Indent * e.Node.Level;
+            int glyphSize = Math.Max(8, e.Bounds.Height / 2);
+            int textLeft = indent + Indent;
+
+            if (e.Node.Nodes.Count > 0)
+            {
+                DrawExpander(e.Graphics,
+                    new Rectangle(indent + (Indent - glyphSize) / 2,
+                                  e.Bounds.Top + (e.Bounds.Height - glyphSize) / 2,
+                                  glyphSize, glyphSize),
+                    e.Node.IsExpanded,
+                    selected ? _theme.Text : _theme.TextMuted);
+            }
+
+            // A folder is a heading, so it is muted; a connection is the thing
+            // the operator is actually looking for.
+            Color fore = selected ? _theme.Text : (isFolder ? _theme.TextMuted : _theme.Text);
+
+            int visibleRight = Width - RightInset;
+            Rectangle textBounds = new Rectangle(
+                textLeft, e.Bounds.Top, Math.Max(10, visibleRight - textLeft - 8), e.Bounds.Height);
+
+            TextRenderer.DrawText(e.Graphics, e.Node.Text, Font, textBounds, fore,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
+                TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
+        }
+
+        private static void DrawExpander(Graphics g, Rectangle bounds, bool expanded, Color colour)
+        {
+            SmoothingMode saved = g.SmoothingMode;
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+
+            float cx = bounds.Left + bounds.Width / 2f;
+            float cy = bounds.Top + bounds.Height / 2f;
+            float r = bounds.Width * 0.26f;
+
+            using (Pen pen = new Pen(colour, Math.Max(1.3f, bounds.Width / 9f)))
+            {
+                pen.StartCap = LineCap.Round;
+                pen.EndCap = LineCap.Round;
+                pen.LineJoin = LineJoin.Round;
+
+                if (expanded)
+                {
+                    g.DrawLines(pen, new PointF[] {
+                        new PointF(cx - r, cy - r * 0.5f),
+                        new PointF(cx,     cy + r * 0.5f),
+                        new PointF(cx + r, cy - r * 0.5f)
+                    });
+                }
+                else
+                {
+                    g.DrawLines(pen, new PointF[] {
+                        new PointF(cx - r * 0.5f, cy - r),
+                        new PointF(cx + r * 0.5f, cy),
+                        new PointF(cx - r * 0.5f, cy + r)
+                    });
+                }
+            }
+
+            g.SmoothingMode = saved;
+        }
+
+        // ---- scrolling ------------------------------------------------------
+        // The vertical scroll bar is a system control that cannot be themed, so
+        // the host clips it out of view and drives these instead.
+
+        /// <summary>Number of rows currently on show, counting expanded children.</summary>
+        public int VisibleNodeCount
+        {
+            get
+            {
+                int count = 0;
+                TreeNode node = (Nodes.Count > 0) ? Nodes[0] : null;
+                while (node != null) { count++; node = node.NextVisibleNode; }
+                return count;
+            }
+        }
+
+        /// <summary>Rows that fit in the client area.</summary>
+        public int RowsPerPage
+        {
+            get
+            {
+                int rowHeight = Math.Max(1, ItemHeight);
+                return Math.Max(1, ClientSize.Height / rowHeight);
+            }
+        }
+
+        public int TopNodeIndex
+        {
+            get
+            {
+                TreeNode top = TopNode;
+                if (top == null) return 0;
+                int index = 0;
+                TreeNode node = (Nodes.Count > 0) ? Nodes[0] : null;
+                while (node != null && !ReferenceEquals(node, top)) { index++; node = node.NextVisibleNode; }
+                return index;
+            }
+            set
+            {
+                int target = Math.Max(0, value);
+                TreeNode node = (Nodes.Count > 0) ? Nodes[0] : null;
+                for (int i = 0; i < target && node != null; i++) node = node.NextVisibleNode;
+                if (node != null) TopNode = node;
+            }
+        }
+    }
+
+    // =========================================================================
     // Menus
     // =========================================================================
 

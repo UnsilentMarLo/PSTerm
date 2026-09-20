@@ -188,6 +188,12 @@ function Set-PSTermFormTheme {
         ($Control -is [PSTerm.Render.TabStrip]) {
             Set-PSTermTabStripTheme -Strip $Control -Theme $Theme
         }
+        ($Control -is [PSTerm.Render.ThemedTreeView]) {
+            $Control.ApplyTheme($ControlTheme)
+        }
+        ($Control -is [PSTerm.Render.ThinScrollBar]) {
+            $Control.ApplyTheme($ControlTheme)
+        }
         ($Control -is [System.Windows.Forms.TextBox]) {
             $Control.BackColor = $Theme.Field
             # A box showing placeholder text keeps its muted colour. The theme
@@ -289,6 +295,151 @@ function New-PSTermMenu {
     $menu.Font = New-PSTermFont
     $menu.ShowImageMargin = $false
     $menu
+}
+
+function Show-PSTermMessage {
+    <#
+    .SYNOPSIS
+        A message box in theme colours.
+    .DESCRIPTION
+        The system MessageBox cannot be themed at all - it is drawn by the shell -
+        so on a dark window every confirmation arrives as a white panel. This is a
+        small form with the same shape and the same return values.
+    .OUTPUTS
+        'Yes', 'No' or 'OK'.
+    #>
+    param(
+        [Parameter(Mandatory)]$Theme,
+        [System.Windows.Forms.IWin32Window]$Owner,
+        [string]$Title = 'PSTerm',
+        [Parameter(Mandatory)][string]$Message,
+        [ValidateSet('OK', 'YesNo')][string]$Buttons = 'OK',
+        [ValidateSet('Info', 'Warning', 'Danger')][string]$Level = 'Info',
+        [switch]$Monospace
+    )
+
+    $scale = [PSTerm.Render.NativeTheme]::GetScale([PSTerm.Render.NativeTheme]::GetUiFont())
+    $rowHeight = [int]([PSTerm.Render.NativeTheme]::GetUiFont().Height * 1.85)
+
+    $dialog = New-Object PSTerm.Render.ThemedForm
+    $dialog.Text = $Title
+    $dialog.FormBorderStyle = 'FixedDialog'
+    $dialog.StartPosition = if ($Owner) { 'CenterParent' } else { 'CenterScreen' }
+    $dialog.MinimizeBox = $false
+    $dialog.MaximizeBox = $false
+    $dialog.ShowInTaskbar = $false
+    $dialog.Font = New-PSTermFont
+
+    $body = New-Object PSTerm.Render.ThemedPanel
+    $body.Dock = 'Fill'
+    $body.Padding = New-Object System.Windows.Forms.Padding([int](16 * $scale))
+
+    # A multiline TextBox only breaks on CRLF, and a here-string in a file saved
+    # with Unix endings carries bare newlines, which ran every line together.
+    $Message = $Message -replace "`r?`n", "`r`n"
+
+    if ($Monospace) {
+        # Preformatted text (the About box) keeps its alignment, and stays
+        # selectable so it can be pasted into a bug report.
+        $text = New-Object System.Windows.Forms.TextBox
+        $text.Multiline = $true
+        $text.ReadOnly = $true
+        $text.BorderStyle = 'None'
+        # No scroll bars: the dialog is sized to the content, and the system ones
+        # are light and cannot be themed.
+        $text.ScrollBars = 'None'
+        $text.WordWrap = $false
+        $text.Font = New-PSTermMonospaceFont -Family 'Consolas' -Size 9.5
+        $text.Text = $Message
+        $text.Dock = 'Fill'
+        $text.BackColor = $Theme.Background
+        $text.ForeColor = $Theme.Text
+        $body.Controls.Add($text)
+
+        # A read-only TextBox selects everything when it takes focus, which looks
+        # like the dialog opened with the text highlighted.
+        $dialog.Add_Shown({
+            $text.SelectionStart = 0
+            $text.SelectionLength = 0
+        }.GetNewClosure())
+
+        $measured = [System.Windows.Forms.TextRenderer]::MeasureText(
+            $Message, $text.Font,
+            (New-Object System.Drawing.Size([int]::MaxValue, [int]::MaxValue)),
+            'NoPrefix')
+        $width = [Math]::Max([int](380 * $scale), $measured.Width + [int](56 * $scale))
+        $height = $measured.Height + $rowHeight + [int](64 * $scale)
+    }
+    else {
+        $label = New-Object System.Windows.Forms.Label
+        $label.Text = $Message
+        $label.AutoSize = $false
+        $label.Dock = 'Fill'
+        $label.TextAlign = 'MiddleLeft'
+        $label.ForeColor = switch ($Level) {
+            'Warning' { $Theme.Warning }
+            'Danger'  { $Theme.Danger }
+            default   { $Theme.Text }
+        }
+        $body.Controls.Add($label)
+
+        $measured = [System.Windows.Forms.TextRenderer]::MeasureText(
+            $Message, $dialog.Font,
+            (New-Object System.Drawing.Size([int](460 * $scale), [int]::MaxValue)),
+            'WordBreak')
+        $width = [Math]::Max([int](340 * $scale), $measured.Width + [int](60 * $scale))
+        $height = $measured.Height + $rowHeight + [int](86 * $scale)
+    }
+
+    $buttonRow = New-Object PSTerm.Render.ThemedPanel
+    $buttonRow.Dock = 'Bottom'
+    $buttonRow.Height = $rowHeight + [int](18 * $scale)
+
+    $flow = New-Object System.Windows.Forms.FlowLayoutPanel
+    $flow.Dock = 'Fill'
+    $flow.FlowDirection = 'RightToLeft'
+    $flow.Padding = New-Object System.Windows.Forms.Padding([int](12 * $scale), [int](9 * $scale), [int](12 * $scale), [int](9 * $scale))
+    $buttonRow.Controls.Add($flow)
+
+    $result = [ref]'OK'
+
+    if ($Buttons -eq 'YesNo') {
+        $no = New-Object System.Windows.Forms.Button
+        $no.Text = 'No'; $no.DialogResult = 'No'
+        $no.Width = [int](96 * $scale); $no.Height = $rowHeight
+
+        $yes = New-Object System.Windows.Forms.Button
+        $yes.Text = 'Yes'; $yes.DialogResult = 'Yes'
+        $yes.Width = [int](96 * $scale); $yes.Height = $rowHeight
+
+        $flow.Controls.AddRange(@($no, $yes))
+        $dialog.AcceptButton = $yes
+        $dialog.CancelButton = $no
+    }
+    else {
+        $ok = New-Object System.Windows.Forms.Button
+        $ok.Text = 'OK'; $ok.DialogResult = 'OK'
+        $ok.Width = [int](96 * $scale); $ok.Height = $rowHeight
+        $flow.Controls.Add($ok)
+        $dialog.AcceptButton = $ok
+        $dialog.CancelButton = $ok
+    }
+
+    $dialog.ClientSize = New-Object System.Drawing.Size($width, $height)
+    $dialog.Controls.Add($body)
+    $dialog.Controls.Add($buttonRow)
+
+    Set-PSTermFormTheme -Control $dialog -Theme $Theme
+    $dialog.Add_Shown({ Set-PSTermTitleBarTheme -Form $dialog -Dark ($Theme.Mode -eq 'Dark') }.GetNewClosure())
+
+    $answer = if ($Owner) { $dialog.ShowDialog($Owner) } else { $dialog.ShowDialog() }
+    $dialog.Dispose()
+
+    switch ($answer) {
+        ([System.Windows.Forms.DialogResult]::Yes) { 'Yes' }
+        ([System.Windows.Forms.DialogResult]::No)  { 'No' }
+        default { 'OK' }
+    }
 }
 
 # =============================================================================

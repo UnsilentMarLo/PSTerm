@@ -415,13 +415,10 @@ function Invoke-PSTermDeleteProfile {
     $profile = Get-PSTermProfileById -Store $State.Store -Id ([string]$node.Tag)
     if (-not $profile) { return }
 
-    $answer = [System.Windows.Forms.MessageBox]::Show(
-        $State.Form,
-        "Delete '$($profile.name)'?",
-        'Delete connection',
-        [System.Windows.Forms.MessageBoxButtons]::YesNo,
-        [System.Windows.Forms.MessageBoxIcon]::Warning)
-    if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) { return }
+    $answer = Show-PSTermMessage -Theme $State.Theme -Owner $State.Form `
+        -Title 'Delete connection' -Buttons YesNo -Level Warning `
+        -Message "Delete '$($profile.name)'?"
+    if ($answer -ne 'Yes') { return }
 
     if ($profile.credentialKey) {
         Remove-PSTermSecret -Root $State.Root -Key ([string]$profile.credentialKey)
@@ -921,7 +918,6 @@ Keyboard
   Shift+PgUp/PgDn Scroll back
 "@
 
-    [void][System.Windows.Forms.MessageBox]::Show($State.Form, $message, 'About PSTerm',
-        [System.Windows.Forms.MessageBoxButtons]::OK,
-        [System.Windows.Forms.MessageBoxIcon]::Information)
+    [void](Show-PSTermMessage -Theme $State.Theme -Owner $State.Form `
+        -Title 'About PSTerm' -Message $message -Monospace)
 }

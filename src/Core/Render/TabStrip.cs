@@ -100,9 +100,14 @@ namespace PSTerm.Render
             Height = 30;
             Dock = DockStyle.Top;
 
+            // Owner-drawn: a system tool tip is light and would be the last
+            // white thing left on a dark window.
             _toolTip = new ToolTip();
             _toolTip.InitialDelay = 600;
             _toolTip.ReshowDelay = 200;
+            _toolTip.OwnerDraw = true;
+            _toolTip.Draw += OnToolTipDraw;
+            _toolTip.Popup += OnToolTipPopup;
         }
 
         public IList<TabStripItem> Items { get { return _items; } }
@@ -487,9 +492,37 @@ namespace PSTerm.Render
                 _selectedIndex + (e.Delta > 0 ? -1 : 1)));
         }
 
+        private void OnToolTipPopup(object sender, PopupEventArgs e)
+        {
+            string text = _toolTip.GetToolTip(e.AssociatedControl);
+            if (string.IsNullOrEmpty(text)) return;
+            Size size = TextRenderer.MeasureText(text, Font,
+                new Size(480, int.MaxValue), TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak);
+            e.ToolTipSize = new Size(size.Width + 18, size.Height + 12);
+        }
+
+        private void OnToolTipDraw(object sender, DrawToolTipEventArgs e)
+        {
+            using (SolidBrush brush = new SolidBrush(ActiveTabBackground))
+                e.Graphics.FillRectangle(brush, e.Bounds);
+            using (Pen pen = new Pen(BorderColor))
+                e.Graphics.DrawRectangle(pen, 0, 0, e.Bounds.Width - 1, e.Bounds.Height - 1);
+
+            Rectangle text = Rectangle.Inflate(e.Bounds, -8, -5);
+            TextRenderer.DrawText(e.Graphics, e.ToolTipText, Font, text, TextColor,
+                TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
+                TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak);
+        }
+
         protected override void Dispose(bool disposing)
         {
-            if (disposing && _toolTip != null) { _toolTip.Dispose(); _toolTip = null; }
+            if (disposing && _toolTip != null)
+            {
+                _toolTip.Draw -= OnToolTipDraw;
+                _toolTip.Popup -= OnToolTipPopup;
+                _toolTip.Dispose();
+                _toolTip = null;
+            }
             base.Dispose(disposing);
         }
     }
