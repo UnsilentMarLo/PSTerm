@@ -1,0 +1,13 @@
+# Compiled core (regenerated on first run from src/Core/*.cs)
+bin/
+
+# Build output
+PSTerm-Compiled/
+
+# Local session logs
+Logs/
+*.log
+
+# Code signing artefacts
+*.cer
+*.pfx
