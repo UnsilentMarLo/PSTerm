@@ -81,11 +81,6 @@ foreach ($item in $include) {
 # src, minus anything that is not needed at runtime.
 Copy-Item -LiteralPath (Join-Path $Root 'src') -Destination $Output -Recurse -Force
 
-$themes = Join-Path $Root 'themes'
-if (Test-Path -LiteralPath $themes) {
-    Copy-Item -LiteralPath $themes -Destination $Output -Recurse -Force
-}
-
 # A package must not carry the packager's own connections or secrets.
 New-Item -ItemType Directory -Path (Join-Path $Output 'Profiles') -Force | Out-Null
 
