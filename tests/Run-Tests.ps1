@@ -669,7 +669,169 @@ Test-Case 'rectangular selection takes the same columns from each row' {
     Assert-Equal "234`r`nbcd`r`nwxy" $text
 }
 
+
+# ------------------------------------------------------ telnet protocol ----
+
+Write-Host "`nTelnet protocol" -ForegroundColor Yellow
+
+$IAC=255; $DONT=254; $DO=253; $WONT=252; $WILL=251; $SB=250; $SE=240; $NOP=241
+$O_BIN=0; $O_ECHO=1; $O_SGA=3; $O_TTYPE=24; $O_NAWS=31
+
+function New-Telnet {
+    param([switch]$NoBinary)
+    $cfg = New-Object PSTerm.Backends.TelnetSettings
+    $cfg.Host = 'test'
+    if ($NoBinary) { $cfg.Binary = $false }
+    $be = New-Object PSTerm.Backends.TelnetBackend($cfg)
+    $ms = New-Object System.IO.MemoryStream
+    $be.TestCaptureOutput($ms)
+    [pscustomobject]@{ Backend = $be; Sink = $ms }
+}
+
+function Get-Sent { param($T) ,$T.Sink.ToArray() }
+
+function Assert-Contains3 {
+    param([byte[]]$Bytes, [int]$A, [int]$B, [int]$C, [string]$Label)
+    for ($i = 0; $i -le $Bytes.Length - 3; $i++) {
+        if ($Bytes[$i] -eq $A -and $Bytes[$i+1] -eq $B -and $Bytes[$i+2] -eq $C) { return }
+    }
+    throw "expected $Label in the telnet stream; got: $(($Bytes | ForEach-Object { $_ }) -join ',')"
+}
+
+function Invoke-Telnet {
+    # NOTE: the parameter cannot be called $Input - that is PowerShell's automatic
+    # pipeline-enumerator variable and binding to it silently yields an enumerator.
+    param($T, [byte[]]$Bytes)
+    $out = New-Object byte[] 8192
+    $n = $T.Backend.TestProcessIncoming($Bytes, $Bytes.Length, $out)
+    if ($n -le 0) { return '' }
+    [System.Text.Encoding]::ASCII.GetString($out, 0, $n)
+}
+
+Test-Case 'plain data passes through untouched' {
+    $t = New-Telnet
+    Assert-Equal 'hello' (Invoke-Telnet $t ([byte[]][char[]]'hello'))
+}
+
+Test-Case 'a doubled IAC becomes one literal 0xFF data byte' {
+    $t = New-Telnet
+    $out = New-Object byte[] 64
+    $n = $t.Backend.TestProcessIncoming([byte[]]@(65, $IAC, $IAC, 66), 4, $out)
+    Assert-Equal 3 $n
+    Assert-Equal 65 $out[0]
+    Assert-Equal 255 $out[1]
+    Assert-Equal 66 $out[2]
+}
+
+Test-Case 'negotiation commands are stripped from the data stream' {
+    $t = New-Telnet
+    Assert-Equal 'AB' (Invoke-Telnet $t ([byte[]]@(65, $IAC, $WILL, $O_ECHO, 66)))
+}
+
+Test-Case 'sub-negotiation is stripped from the data stream' {
+    $t = New-Telnet
+    $bytes = [byte[]]@(65, $IAC, $SB, $O_TTYPE, 1, $IAC, $SE, 66)
+    Assert-Equal 'AB' (Invoke-Telnet $t $bytes)
+}
+
+Test-Case 'a command split across two reads is still handled' {
+    # The v1 parser had no state, so a sequence straddling a read corrupted output.
+    $t = New-Telnet
+    $first  = Invoke-Telnet $t ([byte[]]@(65, $IAC))
+    $second = Invoke-Telnet $t ([byte[]]@($WILL, $O_ECHO, 66))
+    Assert-Equal 'A' $first
+    Assert-Equal 'B' $second
+}
+
+Test-Case 'active negotiation offers the options equipment needs' {
+    # v1 offered none of these, which is why vendor gear misbehaved.
+    $t = New-Telnet
+    $t.Backend.TestStartNegotiation()
+    $sent = Get-Sent $t
+    Assert-Contains3 $sent $IAC $WILL $O_TTYPE 'WILL TERMINAL-TYPE'
+    Assert-Contains3 $sent $IAC $WILL $O_NAWS  'WILL NAWS'
+    Assert-Contains3 $sent $IAC $DO   $O_SGA   'DO SUPPRESS-GO-AHEAD'
+    Assert-Contains3 $sent $IAC $DO   $O_ECHO  'DO ECHO'
+    Assert-Contains3 $sent $IAC $WILL $O_BIN   'WILL BINARY'
+}
+
+Test-Case 'WILL ECHO from the host is accepted with DO ECHO' {
+    $t = New-Telnet
+    [void](Invoke-Telnet $t ([byte[]]@($IAC, $WILL, $O_ECHO)))
+    Assert-Contains3 (Get-Sent $t) $IAC $DO $O_ECHO 'DO ECHO'
+    Assert-True $t.Backend.RemoteEcho 'remote echo should be recorded'
+}
+
+Test-Case 'an unsupported option is refused, not accepted blindly' {
+    $t = New-Telnet
+    [void](Invoke-Telnet $t ([byte[]]@($IAC, $WILL, 99)))
+    Assert-Contains3 (Get-Sent $t) $IAC $DONT 99 'DONT for an unknown option'
+}
+
+Test-Case 'DO TERMINAL-TYPE is answered with WILL' {
+    $t = New-Telnet
+    [void](Invoke-Telnet $t ([byte[]]@($IAC, $DO, $O_TTYPE)))
+    Assert-Contains3 (Get-Sent $t) $IAC $WILL $O_TTYPE 'WILL TERMINAL-TYPE'
+}
+
+Test-Case 'the terminal type is reported when the host asks for it' {
+    $t = New-Telnet
+    [void](Invoke-Telnet $t ([byte[]]@($IAC, $DO, $O_TTYPE)))
+    [void](Invoke-Telnet $t ([byte[]]@($IAC, $SB, $O_TTYPE, 1, $IAC, $SE)))
+    $sent = [System.Text.Encoding]::ASCII.GetString((Get-Sent $t))
+    Assert-True ($sent -match 'xterm-256color') "terminal type not sent; got '$sent'"
+}
+
+Test-Case 'the window size is sent after NAWS is agreed' {
+    $t = New-Telnet
+    $t.Backend.SetInitialSize(132, 43)
+    [void](Invoke-Telnet $t ([byte[]]@($IAC, $DO, $O_NAWS)))
+    $sent = Get-Sent $t
+    # IAC SB NAWS 0 132 0 43 IAC SE
+    Assert-Contains3 $sent $IAC $SB $O_NAWS 'NAWS sub-negotiation'
+    $found = $false
+    for ($i = 0; $i -le $sent.Length - 7; $i++) {
+        if ($sent[$i] -eq $IAC -and $sent[$i+1] -eq $SB -and $sent[$i+2] -eq $O_NAWS -and
+            $sent[$i+3] -eq 0 -and $sent[$i+4] -eq 132 -and $sent[$i+5] -eq 0 -and $sent[$i+6] -eq 43) { $found = $true }
+    }
+    Assert-True $found 'NAWS should carry 132x43 as big-endian 16-bit values'
+}
+
+Test-Case 'a resize re-sends the window size' {
+    $t = New-Telnet
+    [void](Invoke-Telnet $t ([byte[]]@($IAC, $DO, $O_NAWS)))
+    $before = (Get-Sent $t).Length
+    $t.Backend.Resize(100, 30)
+    Assert-True ((Get-Sent $t).Length -gt $before) 'resize should put a NAWS update on the wire'
+}
+
+Test-Case 'a 0xFF byte in user input is escaped' {
+    $t = New-Telnet
+    $t.Backend.TestWriteEscaped([byte[]]@(65, 255, 66))
+    $sent = Get-Sent $t
+    Assert-Equal 4 $sent.Length
+    Assert-Equal 255 $sent[1]
+    Assert-Equal 255 $sent[2]
+}
+
+Test-Case 'binary mode can be declined by configuration' {
+    $t = New-Telnet -NoBinary
+    $t.Backend.TestStartNegotiation()
+    $sent = Get-Sent $t
+    $hasBinary = $false
+    for ($i = 0; $i -le $sent.Length - 3; $i++) {
+        if ($sent[$i] -eq $IAC -and $sent[$i+1] -eq $WILL -and $sent[$i+2] -eq $O_BIN) { $hasBinary = $true }
+    }
+    Assert-True (-not $hasBinary) 'binary should not be offered when disabled'
+}
+
+Test-Case 'a NOP command is consumed without producing data' {
+    $t = New-Telnet
+    Assert-Equal 'AB' (Invoke-Telnet $t ([byte[]]@(65, $IAC, $NOP, 66)))
+}
+
 # ---------------------------------------------------------------- summary ---
+
 
 Write-Host ""
 Write-Host ("-" * 60)
