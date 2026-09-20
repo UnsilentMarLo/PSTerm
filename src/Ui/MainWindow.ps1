@@ -43,11 +43,19 @@ function New-PSTermMainWindow {
 
     # ---------------------------------------------------------------- form ---
 
-    $form = New-Object System.Windows.Forms.Form
+    # ThemedForm buffers the whole window (WS_EX_COMPOSITED). WinForms' own
+    # double buffering covers a control's own surface but not the seams between
+    # siblings, which is what made drop-downs and menus flicker on hover.
+    $form = New-Object PSTerm.Render.ThemedForm
+    # Composited painting is left on for dialogs, where it removes the drop-down
+    # and menu flicker, but turned off here: measured on this machine it roughly
+    # doubles the cost of a full repaint (69ms -> 128ms), and the terminal
+    # repaints its whole grid every time output scrolls. The containers in this
+    # window are double-buffered individually instead.
+    $form.CompositedPainting = $false
     $form.Text = 'PSTerm'
     $form.StartPosition = 'CenterScreen'
-    $form.MinimumSize = New-Object System.Drawing.Size(720, 460)
-    $form.Font = New-PSTermFont -Size 9
+    $form.Font = New-PSTermFont
     $form.KeyPreview = $true
     $state.Form = $form
 
@@ -57,40 +65,54 @@ function New-PSTermMainWindow {
     }
 
     $scale = Get-PSTermScale -Control $form
+    $form.MinimumSize = New-Object System.Drawing.Size([int](760 * $scale), [int](480 * $scale))
     $form.Size = New-Object System.Drawing.Size([int](1100 * $scale), [int](700 * $scale))
+
+    # Row height for anything that sits beside a text field, so the top bar and
+    # the buttons in it line up regardless of the system text size.
+    $rowHeight = [int]($form.Font.Height * 1.85)
 
     # ------------------------------------------------------------- top bar ---
 
-    $topBar = New-Object System.Windows.Forms.Panel
+    # The bar is sized from the font, and its children are anchored left/right
+    # rather than docked, so the row centres them vertically. Docking a
+    # single-line TextBox into a taller row is what left it looking clipped.
+    $padY = [int](6 * $scale)
+    $topBar = New-Object PSTerm.Render.ThemedPanel
     $topBar.Dock = 'Top'
-    $topBar.Height = [int](38 * $scale)
-    $topBar.Padding = New-Object System.Windows.Forms.Padding([int](6 * $scale))
+    $topBar.Height = $rowHeight + ($padY * 2)
+    $topBar.Padding = New-Object System.Windows.Forms.Padding([int](8 * $scale), $padY, [int](8 * $scale), $padY)
 
     $quickBox = New-Object System.Windows.Forms.TextBox
-    $quickBox.Dock = 'Fill'
-    $quickBox.Font = New-PSTermFont -Size 9.5
+    $quickBox.Anchor = 'Left, Right'
+    $quickBox.Font = New-PSTermFont
+    $quickBox.Margin = New-Object System.Windows.Forms.Padding(0)
     $state.QuickBox = $quickBox
 
     # A placeholder beats a label here: the bar explains itself and costs no width.
-    Set-PSTermPlaceholder -TextBox $quickBox -Text 'Connect to  user@host   host:2222   telnet host   COM3:115200   cmd     (Enter)'
+    Set-PSTermPlaceholder -TextBox $quickBox -Theme $state.Theme `
+        -Text 'Connect to    user@host    host:2222    telnet host    COM3:115200    cmd        (Enter)'
 
     $connectButton = New-Object System.Windows.Forms.Button
     $connectButton.Text = 'Connect'
-    $connectButton.Dock = 'Fill'
-    $connectButton.Margin = New-Object System.Windows.Forms.Padding([int](4 * $scale), 0, 0, 0)
+    $connectButton.Anchor = 'Left, Right'
+    $connectButton.Height = $rowHeight
+    $connectButton.Margin = New-Object System.Windows.Forms.Padding([int](6 * $scale), 0, 0, 0)
 
     $menuButton = New-Object System.Windows.Forms.Button
     $menuButton.Text = 'Menu'
-    $menuButton.Dock = 'Fill'
-    $menuButton.Margin = New-Object System.Windows.Forms.Padding([int](4 * $scale), 0, 0, 0)
+    $menuButton.Anchor = 'Left, Right'
+    $menuButton.Height = $rowHeight
+    $menuButton.Margin = New-Object System.Windows.Forms.Padding([int](6 * $scale), 0, 0, 0)
 
     $topLayout = New-Object System.Windows.Forms.TableLayoutPanel
     $topLayout.Dock = 'Fill'
     $topLayout.ColumnCount = 3
     $topLayout.RowCount = 1
+    [void]$topLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Percent', 100)))
     [void]$topLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Percent', 100)))
-    [void]$topLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', [int](90 * $scale))))
-    [void]$topLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', [int](70 * $scale))))
+    [void]$topLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', [int](96 * $scale))))
+    [void]$topLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', [int](76 * $scale))))
     $topLayout.Controls.Add($quickBox, 0, 0)
     $topLayout.Controls.Add($connectButton, 1, 0)
     $topLayout.Controls.Add($menuButton, 2, 0)
@@ -105,14 +127,21 @@ function New-PSTermMainWindow {
 
     # ------------------------------------------------------- session tree ----
 
-    $sidePanel = New-Object System.Windows.Forms.Panel
+    $sidePanel = New-Object PSTerm.Render.ThemedPanel
     $sidePanel.Dock = 'Fill'
 
+    $searchHost = New-Object PSTerm.Render.ThemedPanel
+    $searchHost.Dock = 'Top'
+    $searchHost.Height = $rowHeight + [int](10 * $scale)
+    $searchHost.Padding = New-Object System.Windows.Forms.Padding([int](6 * $scale), [int](5 * $scale), [int](6 * $scale), [int](5 * $scale))
+
     $searchBox = New-Object System.Windows.Forms.TextBox
-    $searchBox.Dock = 'Top'
+    $searchBox.Dock = 'Fill'
+    $searchBox.Font = New-PSTermFont
     $searchBox.Margin = New-Object System.Windows.Forms.Padding(0)
     $state.SearchBox = $searchBox
-    Set-PSTermPlaceholder -TextBox $searchBox -Text 'Search sessions'
+    Set-PSTermPlaceholder -TextBox $searchBox -Theme $state.Theme -Text 'Search sessions'
+    $searchHost.Controls.Add($searchBox)
 
     $tree = New-Object System.Windows.Forms.TreeView
     $tree.Dock = 'Fill'
@@ -120,31 +149,31 @@ function New-PSTermMainWindow {
     $tree.ShowLines = $false
     $tree.ShowRootLines = $false
     $tree.ShowPlusMinus = $true
-    $tree.ItemHeight = [int](22 * $scale)
+    $tree.ItemHeight = [int]($form.Font.Height * 1.55)
     $tree.FullRowSelect = $true
     $state.Tree = $tree
 
     $treeButtons = New-Object System.Windows.Forms.FlowLayoutPanel
     $treeButtons.Dock = 'Bottom'
-    $treeButtons.Height = [int](32 * $scale)
+    $treeButtons.Height = $rowHeight + [int](10 * $scale)
     $treeButtons.FlowDirection = 'LeftToRight'
-    $treeButtons.Padding = New-Object System.Windows.Forms.Padding([int](4 * $scale), [int](3 * $scale), 0, 0)
+    $treeButtons.Padding = New-Object System.Windows.Forms.Padding([int](6 * $scale), [int](5 * $scale), 0, 0)
 
     $newButton = New-Object System.Windows.Forms.Button
     $newButton.Text = 'New'
-    $newButton.Width = [int](56 * $scale)
+    $newButton.Width = [int](62 * $scale); $newButton.Height = $rowHeight
     $editButton = New-Object System.Windows.Forms.Button
     $editButton.Text = 'Edit'
-    $editButton.Width = [int](56 * $scale)
+    $editButton.Width = [int](62 * $scale); $editButton.Height = $rowHeight
     $deleteButton = New-Object System.Windows.Forms.Button
     $deleteButton.Text = 'Delete'
-    $deleteButton.Width = [int](62 * $scale)
+    $deleteButton.Width = [int](70 * $scale); $deleteButton.Height = $rowHeight
     $treeButtons.Controls.AddRange(@($newButton, $editButton, $deleteButton))
 
     # Order matters for docking: Fill is added first so Top and Bottom take their
     # space from the edges rather than overlapping it.
     $sidePanel.Controls.Add($tree)
-    $sidePanel.Controls.Add($searchBox)
+    $sidePanel.Controls.Add($searchHost)
     $sidePanel.Controls.Add($treeButtons)
     $split.Panel1.Controls.Add($sidePanel)
 
@@ -153,13 +182,15 @@ function New-PSTermMainWindow {
     # A custom strip rather than TabControl: WinForms paints the band behind its
     # tabs with the system visual style and ignores BackColor, so a dark app ends
     # up with a white bar, and it offers no per-tab close button.
-    $tabHost = New-Object System.Windows.Forms.Panel
+    $tabHost = New-Object PSTerm.Render.ThemedPanel
     $tabHost.Dock = 'Fill'
 
     $tabs = New-Object PSTerm.Render.TabStrip
     $tabs.Dock = 'Top'
-    $tabs.Height = [int](30 * $scale)
-    $tabs.Font = New-PSTermFont -Size 9
+    $tabs.Height = [int]($form.Font.Height * 2.0)
+    $tabs.Font = New-PSTermFont
+    $tabs.MaxTabWidth = [int](220 * $scale)
+    $tabs.MinTabWidth = [int](100 * $scale)
 
     $state.TabStrip = $tabs
     $state.TabHost = $tabHost
@@ -170,7 +201,9 @@ function New-PSTermMainWindow {
     # --------------------------------------------------------- status bar ----
 
     $status = New-Object System.Windows.Forms.StatusStrip
-    $status.SizingGrip = $true
+    # Off deliberately: the grip is system-drawn in light colours and cannot be
+    # themed. The window still resizes from its edges.
+    $status.SizingGrip = $false
     $statusLeft = New-Object System.Windows.Forms.ToolStripStatusLabel
     $statusLeft.Spring = $true
     $statusLeft.TextAlign = 'MiddleLeft'
@@ -205,9 +238,10 @@ function New-PSTermMainWindow {
         Close-PSTermTab -State $state -Index $e.Index
     }.GetNewClosure())
 
+    # The plus button opens the session menu. Moving focus to the quick-connect
+    # bar, as it used to, gave no indication of what to do next.
     $tabs.Add_NewTabRequested({
-        $state.QuickBox.Focus() | Out-Null
-        $state.QuickBox.SelectAll()
+        Show-PSTermNewSessionMenu -State $state -Anchor $state.TabStrip
     }.GetNewClosure())
 
     $quickBox.Add_KeyDown({
@@ -290,20 +324,7 @@ function Apply-PSTermTheme {
     $State.Status.ForeColor = $theme.TextMuted
     foreach ($item in $State.Status.Items) { $item.ForeColor = $theme.TextMuted }
 
-    $strip = $State.TabStrip
-    $strip.StripBackground     = $theme.Background
-    $strip.TabBackground       = $theme.Background
-    $strip.ActiveTabBackground = $theme.Surface
-    $strip.HoverTabBackground  = $theme.SurfaceAlt
-    $strip.TextColor           = $theme.Text
-    $strip.MutedTextColor      = $theme.TextMuted
-    $strip.AccentColor         = $theme.Accent
-    $strip.BorderColor         = $theme.Border
-    $strip.ConnectedColor      = $theme.Success
-    $strip.DisconnectedColor   = $theme.TextMuted
-    $strip.FailedColor         = $theme.Danger
-    $strip.Invalidate()
-
+    Set-PSTermTabStripTheme -Strip $State.TabStrip -Theme $theme
     Set-PSTermTitleBarTheme -Form $State.Form -Dark ($theme.Mode -eq 'Dark')
     $State.Form.Invalidate($true)
 }
@@ -799,53 +820,4 @@ function Select-PSTermNextTab {
     if ($count -eq 0) { return }
     $next = ($State.TabStrip.SelectedIndex + $Delta + $count) % $count
     $State.TabStrip.SelectedIndex = $next
-}
-
-# =============================================================================
-# Placeholder text
-# =============================================================================
-# WinForms has no placeholder support before .NET 5, and PSTerm targets 5.1 as
-# well, so it is done by hand. The placeholder is never returned as a value.
-
-function Set-PSTermPlaceholder {
-    param([System.Windows.Forms.TextBox]$TextBox, [string]$Text)
-
-    $TextBox.Tag = [pscustomobject]@{ Placeholder = $Text; IsPlaceholder = $true }
-    $TextBox.Text = $Text
-    $TextBox.ForeColor = [System.Drawing.Color]::Gray
-
-    $TextBox.Add_GotFocus({
-        param($sender, $e)
-        if ($sender.Tag -and $sender.Tag.IsPlaceholder) {
-            $sender.Text = ''
-            $sender.Tag.IsPlaceholder = $false
-            $sender.ForeColor = [System.Drawing.Color]::Empty
-            $sender.ResetForeColor()
-        }
-    })
-
-    $TextBox.Add_LostFocus({
-        param($sender, $e)
-        if ([string]::IsNullOrEmpty($sender.Text) -and $sender.Tag) {
-            $sender.Tag.IsPlaceholder = $true
-            $sender.Text = $sender.Tag.Placeholder
-            $sender.ForeColor = [System.Drawing.Color]::Gray
-        }
-    })
-}
-
-function Get-PSTermPlaceholderText {
-    <#
-    .SYNOPSIS
-        The real contents of a placeholder text box, or '' when only the hint is showing.
-    #>
-    param([System.Windows.Forms.TextBox]$TextBox)
-    if ($TextBox.Tag -and $TextBox.Tag.IsPlaceholder) { return '' }
-    $TextBox.Text.Trim()
-}
-
-function Clear-PSTermPlaceholder {
-    param([System.Windows.Forms.TextBox]$TextBox)
-    $TextBox.Text = ''
-    if ($TextBox.Tag) { $TextBox.Tag.IsPlaceholder = $false }
 }

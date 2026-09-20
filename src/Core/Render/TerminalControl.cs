@@ -17,6 +17,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Text;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
 
@@ -50,6 +51,36 @@ namespace PSTerm.Render
         public TerminalInputEventArgs(string text) { Text = text; }
     }
 
+    /// <summary>GDI entry points used by the batched text path.</summary>
+    internal static class Gdi
+    {
+        internal const int TRANSPARENT = 1;
+
+        [DllImport("gdi32.dll")]
+        internal static extern int SetBkMode(IntPtr hdc, int mode);
+
+        [DllImport("gdi32.dll")]
+        internal static extern int SetTextColor(IntPtr hdc, int colorRef);
+
+        [DllImport("gdi32.dll")]
+        internal static extern IntPtr SelectObject(IntPtr hdc, IntPtr obj);
+
+        [DllImport("gdi32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool DeleteObject(IntPtr obj);
+
+        [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool ExtTextOut(IntPtr hdc, int x, int y, uint options,
+                                               IntPtr rect, string text, uint count, IntPtr dx);
+
+        /// <summary>GDI wants colours as 0x00BBGGRR, the reverse of ARGB.</summary>
+        internal static int ToColorRef(Color c)
+        {
+            return c.R | (c.G << 8) | (c.B << 16);
+        }
+    }
+
     public sealed class TerminalControl : Control, PSTerm.ITerminalSink
     {
         // ---- model ---------------------------------------------------------
@@ -68,7 +99,31 @@ namespace PSTerm.Render
         private int _baselineOffset;
         private bool _metricsValid;
 
+        /// <summary>One run of text, queued during the paint and drawn in a batch.</summary>
+        private struct TextRun
+        {
+            public int X;
+            public int Y;
+            public string Text;
+            public Font Font;
+            public Color Colour;
+        }
+
+        // Text is collected while the rest of the frame is drawn, then written in
+        // one pass. Every TextRenderer.DrawText call checks an HDC out of the
+        // Graphics and back again, and a screen with frequent colour changes
+        // produces hundreds of runs: that handover, not the drawing, was the
+        // bulk of the frame time.
+        private readonly List<TextRun> _pendingText = new List<TextRun>(512);
+        private readonly Dictionary<Font, IntPtr> _hFontCache = new Dictionary<Font, IntPtr>();
+
         // ---- painting -------------------------------------------------------
+        // Brushes and pens are cached by colour. A full repaint draws a run per
+        // change of attribute - on a busy screen well over a thousand - and
+        // allocating a GDI object for each was the bulk of the frame time.
+        private readonly Dictionary<int, SolidBrush> _brushCache = new Dictionary<int, SolidBrush>();
+        private readonly Dictionary<int, Pen> _penCache = new Dictionary<int, Pen>();
+
         private readonly Timer _renderTimer;
         private volatile bool _needsPaint;
         private Bitmap _backBuffer;
@@ -76,7 +131,7 @@ namespace PSTerm.Render
 
         // ---- viewport / scrollback -------------------------------------------
         private int _scrollOffset;           // lines scrolled back from the live bottom
-        private VScrollBar _scrollBar;
+        private ThinScrollBar _scrollBar;
         private bool _updatingScrollBar;
 
         // ---- selection ------------------------------------------------------
@@ -117,7 +172,9 @@ namespace PSTerm.Render
             _term = new TerminalEmulator(80, 24, 5000);
             HookEmulator(_term);
 
-            _scrollBar = new VScrollBar();
+            // A slim owner-drawn bar rather than VScrollBar, which is a system
+            // control that ignores BackColor and stays light beside a dark grid.
+            _scrollBar = new ThinScrollBar();
             _scrollBar.Dock = DockStyle.Right;
             _scrollBar.Visible = false;
             _scrollBar.ValueChanged += OnScrollBarChanged;
@@ -140,6 +197,113 @@ namespace PSTerm.Render
         // Public surface
         // =====================================================================
 
+        private SolidBrush GetBrush(Color colour)
+        {
+            int key = colour.ToArgb();
+            SolidBrush brush;
+            if (_brushCache.TryGetValue(key, out brush)) return brush;
+
+            // The palette is bounded, but a device emitting truecolor is not, so
+            // the cache is dropped rather than allowed to grow without limit.
+            if (_brushCache.Count > 512) { DisposeCaches(); }
+
+            brush = new SolidBrush(colour);
+            _brushCache[key] = brush;
+            return brush;
+        }
+
+        private Pen GetPen(Color colour)
+        {
+            int key = colour.ToArgb();
+            Pen pen;
+            if (_penCache.TryGetValue(key, out pen)) return pen;
+
+            if (_penCache.Count > 512)
+            {
+                foreach (Pen p in _penCache.Values) p.Dispose();
+                _penCache.Clear();
+            }
+
+            pen = new Pen(colour);
+            _penCache[key] = pen;
+            return pen;
+        }
+
+        private void DisposeCaches()
+        {
+            foreach (SolidBrush b in _brushCache.Values) b.Dispose();
+            _brushCache.Clear();
+            foreach (Pen p in _penCache.Values) p.Dispose();
+            _penCache.Clear();
+            DisposeFontHandles();
+        }
+
+        private void DisposeFontHandles()
+        {
+            foreach (IntPtr h in _hFontCache.Values)
+            {
+                if (h != IntPtr.Zero) Gdi.DeleteObject(h);
+            }
+            _hFontCache.Clear();
+        }
+
+        private IntPtr GetFontHandle(Font font)
+        {
+            IntPtr handle;
+            if (_hFontCache.TryGetValue(font, out handle)) return handle;
+            handle = font.ToHfont();
+            _hFontCache[font] = handle;
+            return handle;
+        }
+
+        /// <summary>
+        /// Write every queued run through a single device context.
+        /// </summary>
+        private void FlushText(Graphics g)
+        {
+            if (_pendingText.Count == 0) return;
+
+            IntPtr hdc = g.GetHdc();
+            try
+            {
+                Gdi.SetBkMode(hdc, Gdi.TRANSPARENT);
+
+                Font currentFont = null;
+                int currentColour = -1;
+                IntPtr previousFont = IntPtr.Zero;
+                bool first = true;
+
+                for (int i = 0; i < _pendingText.Count; i++)
+                {
+                    TextRun run = _pendingText[i];
+
+                    if (!ReferenceEquals(run.Font, currentFont))
+                    {
+                        IntPtr selected = Gdi.SelectObject(hdc, GetFontHandle(run.Font));
+                        if (first) { previousFont = selected; first = false; }
+                        currentFont = run.Font;
+                    }
+
+                    int colour = Gdi.ToColorRef(run.Colour);
+                    if (colour != currentColour)
+                    {
+                        Gdi.SetTextColor(hdc, colour);
+                        currentColour = colour;
+                    }
+
+                    Gdi.ExtTextOut(hdc, run.X, run.Y, 0, IntPtr.Zero,
+                                   run.Text, (uint)run.Text.Length, IntPtr.Zero);
+                }
+
+                if (previousFont != IntPtr.Zero) Gdi.SelectObject(hdc, previousFont);
+            }
+            finally
+            {
+                g.ReleaseHdc(hdc);
+                _pendingText.Clear();
+            }
+        }
+
         public TerminalEmulator Terminal { get { return _term; } }
 
         /// <summary>Lock this around any access to the emulator from another thread.</summary>
@@ -153,7 +317,8 @@ namespace PSTerm.Render
                 if (value == null) return;
                 _palette = value;
                 BackColor = _palette.Background;
-                if (_scrollBar != null) { /* keep the system scrollbar chrome */ }
+                if (_scrollBar != null) _scrollBar.ApplyTheme(BuildScrollBarTheme());
+                DisposeCaches();
                 InvalidateAll();
             }
         }
@@ -170,6 +335,21 @@ namespace PSTerm.Render
 
         public int Cols { get { return _term.Cols; } }
         public int Rows { get { return _term.Rows; } }
+
+        /// <summary>
+        /// Colours for the scroll bar, derived from the terminal palette so it
+        /// belongs to the session rather than to the application chrome.
+        /// </summary>
+        private ControlTheme BuildScrollBarTheme()
+        {
+            ControlTheme t = new ControlTheme();
+            t.Background = _palette.Background;
+            bool dark = TerminalPalette.Luminance(_palette.Background) < 0.5;
+            t.Border = TerminalPalette.Blend(_palette.Foreground, _palette.Background, dark ? 0.30 : 0.35);
+            t.BorderStrong = TerminalPalette.Blend(_palette.Foreground, _palette.Background, dark ? 0.55 : 0.60);
+            t.IsDark = dark;
+            return t;
+        }
 
         /// <summary>Number of scrollback lines currently scrolled into view.</summary>
         public int ScrollOffset { get { return _scrollOffset; } }
@@ -600,11 +780,8 @@ namespace PSTerm.Render
                 int historyCount = _term.IsAlternateScreen ? 0 : _term.Primary.HistoryCount;
                 int topAbs = historyCount + 0 - _scrollOffset;
 
-                using (SolidBrush bg = new SolidBrush(_palette.Background))
-                {
-                    if (full)
-                        g.FillRectangle(bg, 0, 0, ClientSize.Width, ClientSize.Height);
-                }
+                if (full)
+                    g.FillRectangle(GetBrush(_palette.Background), 0, 0, ClientSize.Width, ClientSize.Height);
 
                 // The row the cursor was last drawn on must be repainted even when
                 // the model did not change there, or the block it left behind
@@ -624,6 +801,9 @@ namespace PSTerm.Render
 
                     RenderRow(g, row, abs, line, cols, reversed);
                 }
+
+                // All queued text is written here, in one device context.
+                FlushText(g);
 
                 screen.ClearDamage();
 
@@ -647,8 +827,7 @@ namespace PSTerm.Render
 
             if (line == null)
             {
-                using (SolidBrush b = new SolidBrush(_palette.Background))
-                    g.FillRectangle(b, 0, y, ClientSize.Width, _cellHeight);
+                g.FillRectangle(GetBrush(_palette.Background), 0, y, ClientSize.Width, _cellHeight);
                 return;
             }
 
@@ -667,16 +846,14 @@ namespace PSTerm.Render
                     if (b2 != back) break;
                     c++;
                 }
-                using (SolidBrush b = new SolidBrush(back))
-                    g.FillRectangle(b, start * _cellWidth, y, (c - start) * _cellWidth, _cellHeight);
+                g.FillRectangle(GetBrush(back), start * _cellWidth, y, (c - start) * _cellWidth, _cellHeight);
             }
 
             // Fill any pixels past the last column (window not an exact multiple).
             int gridRight = cols * _cellWidth;
             if (gridRight < ClientSize.Width)
             {
-                using (SolidBrush b = new SolidBrush(_palette.Background))
-                    g.FillRectangle(b, gridRight, y, ClientSize.Width - gridRight, _cellHeight);
+                g.FillRectangle(GetBrush(_palette.Background), gridRight, y, ClientSize.Width - gridRight, _cellHeight);
             }
 
             // Pass 2: glyph runs sharing font and colour.
@@ -744,33 +921,32 @@ namespace PSTerm.Render
 
             if (!allBlank)
             {
-                // Drawing the run in one call keeps a full screen to a few hundred
-                // GDI calls. TextRenderer (GDI) is used rather than DrawString
-                // (GDI+) because it aligns monospace glyphs to the cell grid.
-                TextRenderer.DrawText(g, text, font, new Point(x, y + _baselineOffset), fore,
-                                      TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix |
-                                      TextFormatFlags.PreserveGraphicsClipping);
+                // Queued rather than drawn here; FlushText writes them all through
+                // one device context at the end of the frame.
+                TextRun run = new TextRun();
+                run.X = x;
+                run.Y = y + _baselineOffset;
+                run.Text = text;
+                run.Font = font;
+                run.Colour = fore;
+                _pendingText.Add(run);
             }
 
             int runWidth = cellSpan * _cellWidth;
 
             if ((flags & CellFlags.Underline) != 0)
             {
-                using (Pen p = new Pen(fore))
-                    g.DrawLine(p, x, y + _cellHeight - 2, x + runWidth, y + _cellHeight - 2);
+                g.DrawLine(GetPen(fore), x, y + _cellHeight - 2, x + runWidth, y + _cellHeight - 2);
             }
             if ((flags & CellFlags.DoubleUnderline) != 0)
             {
-                using (Pen p = new Pen(fore))
-                {
-                    g.DrawLine(p, x, y + _cellHeight - 3, x + runWidth, y + _cellHeight - 3);
-                    g.DrawLine(p, x, y + _cellHeight - 1, x + runWidth, y + _cellHeight - 1);
-                }
+                Pen p = GetPen(fore);
+                g.DrawLine(p, x, y + _cellHeight - 3, x + runWidth, y + _cellHeight - 3);
+                g.DrawLine(p, x, y + _cellHeight - 1, x + runWidth, y + _cellHeight - 1);
             }
             if ((flags & CellFlags.Strikethrough) != 0)
             {
-                using (Pen p = new Pen(fore))
-                    g.DrawLine(p, x, y + _cellHeight / 2, x + runWidth, y + _cellHeight / 2);
+                g.DrawLine(GetPen(fore), x, y + _cellHeight / 2, x + runWidth, y + _cellHeight / 2);
             }
         }
 
@@ -820,21 +996,24 @@ namespace PSTerm.Render
             {
                 // Unfocused terminals show a hollow box, the xterm convention, so it
                 // is obvious at a glance which pane has the keyboard.
-                using (Pen p = new Pen(_palette.CursorColor))
-                    g.DrawRectangle(p, x, y, _cellWidth - 1, _cellHeight - 1);
+                g.DrawRectangle(GetPen(_palette.CursorColor), x, y, _cellWidth - 1, _cellHeight - 1);
                 return;
             }
 
-            using (SolidBrush b = new SolidBrush(_palette.CursorColor))
-                g.FillRectangle(b, x, y, _cellWidth, _cellHeight);
+            g.FillRectangle(GetBrush(_palette.CursorColor), x, y, _cellWidth, _cellHeight);
 
             Cell cell = _term.Screen.GetCell(cy, cx);
             char ch = cell.Ch == '\0' ? ' ' : cell.Ch;
             if (ch != ' ')
             {
-                TextRenderer.DrawText(g, ch.ToString(), FontFor(cell.Flags),
-                                      new Point(x, y + _baselineOffset), _palette.CursorTextColor,
-                                      TextFormatFlags.NoPadding | TextFormatFlags.NoPrefix);
+                TextRun run = new TextRun();
+                run.X = x;
+                run.Y = y + _baselineOffset;
+                run.Text = ch.ToString();
+                run.Font = FontFor(cell.Flags);
+                run.Colour = _palette.CursorTextColor;
+                _pendingText.Add(run);
+                FlushText(g);
             }
         }
 
@@ -1347,6 +1526,9 @@ namespace PSTerm.Render
 
         private void DisposeFonts()
         {
+            // The GDI handles were made from these fonts and must go with them.
+            DisposeFontHandles();
+
             if (_boldFont != null) { _boldFont.Dispose(); _boldFont = null; }
             if (_italicFont != null) { _italicFont.Dispose(); _italicFont = null; }
             if (_boldItalicFont != null) { _boldItalicFont.Dispose(); _boldItalicFont = null; }
@@ -1361,6 +1543,7 @@ namespace PSTerm.Render
                 if (_blinkTimer != null) { _blinkTimer.Stop(); _blinkTimer.Dispose(); }
                 DisposeBackBuffer();
                 DisposeFonts();
+                DisposeCaches();
             }
             base.Dispose(disposing);
         }

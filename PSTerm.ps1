@@ -71,20 +71,16 @@ if ([string]::IsNullOrWhiteSpace($Root)) { $Root = (Get-Location).Path }
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 
-# DPI awareness has to be set before the first window exists, or the whole UI is
-# bitmap-stretched and blurry on a scaled display.
-try { [System.Windows.Forms.Application]::SetHighDpiMode([System.Windows.Forms.HighDpiMode]::PerMonitorV2) | Out-Null }
-catch {
-    # Not available on .NET Framework; the app.manifest route is not open to a
-    # script host, so on 5.1 WinForms falls back to system DPI awareness.
-}
-[System.Windows.Forms.Application]::EnableVisualStyles()
-[System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
-
+# The core is loaded first because DPI awareness has to be declared before the
+# process creates a window, and the call lives in the core. Loading an assembly
+# creates no windows, so this ordering is safe.
 . (Join-Path $Root 'src\Bootstrap.ps1')
 
 try {
     Initialize-PSTermCore -Root $Root -Force:$Rebuild
+    # Without this Windows renders at 96 DPI and stretches the bitmap, which is
+    # what makes text look soft on a scaled display.
+    $script:DpiAwareness = [PSTerm.Render.NativeTheme]::EnableDpiAwareness()
 }
 catch {
     $message = "PSTerm could not start.`n`n$($_.Exception.Message)"
@@ -96,6 +92,9 @@ catch {
     catch { Write-Error $message }
     exit 1
 }
+
+[System.Windows.Forms.Application]::EnableVisualStyles()
+[System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
 
 . (Join-Path $Root 'src\Settings.ps1')
 . (Join-Path $Root 'src\Secrets.ps1')
@@ -115,6 +114,8 @@ if ($NoWindow) {
     Write-Host "Install folder  : $Root"
     Write-Host "PowerShell      : $($PSVersionTable.PSVersion) ($($PSVersionTable.PSEdition))"
     Write-Host "Native core     : loaded"
+    Write-Host "DPI awareness   : $script:DpiAwareness" `
+        -ForegroundColor $(if ($script:DpiAwareness -eq 'none') { 'Yellow' } else { 'Green' })
 
     $pty = [PSTerm.Backends.ConPtyBackend]::IsSupported
     Write-Host "Pseudo-console  : $(if ($pty) { 'available' } else { 'NOT available - SSH and local shells need Windows 10 1809+' })" `

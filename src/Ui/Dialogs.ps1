@@ -54,6 +54,11 @@ function Add-PSTermField {
     $Grid.Controls.Add((New-PSTermLabel -Text $Label -Theme $Theme), 0, $row)
     $Control.Dock = 'Fill'
     $Control.Margin = New-Object System.Windows.Forms.Padding(3)
+    # A combo box will not take an arbitrary height, so the row is matched to it
+    # rather than the other way round.
+    if ($Control -is [PSTerm.Render.ThemedComboBox]) {
+        $Control.ItemHeight = [int]($Control.Font.Height * 1.25)
+    }
     $Grid.Controls.Add($Control, 1, $row)
     $Control
 }
@@ -62,8 +67,11 @@ function New-PSTermTextField { param([string]$Value = '')
     $t = New-Object System.Windows.Forms.TextBox; $t.Text = [string]$Value; $t }
 
 function New-PSTermComboField {
+    # ThemedComboBox rather than ComboBox: the framework draws the drop-down
+    # button and the list with the system visual style and ignores BackColor,
+    # which leaves white blocks on a dark form.
     param([string[]]$Items, [string]$Value = '', [switch]$Editable)
-    $c = New-Object System.Windows.Forms.ComboBox
+    $c = New-Object PSTerm.Render.ThemedComboBox
     $c.DropDownStyle = if ($Editable) { 'DropDown' } else { 'DropDownList' }
     foreach ($item in $Items) { [void]$c.Items.Add($item) }
     if ($Value -and $c.Items.Contains($Value)) { $c.SelectedItem = $Value }
@@ -73,8 +81,10 @@ function New-PSTermComboField {
 }
 
 function New-PSTermCheckField {
+    # ThemedCheckBox: the system check glyph is a white square that no property
+    # can recolour.
     param([string]$Text, [bool]$Checked)
-    $c = New-Object System.Windows.Forms.CheckBox
+    $c = New-Object PSTerm.Render.ThemedCheckBox
     $c.Text = $Text
     $c.Checked = $Checked
     $c.AutoSize = $true
@@ -122,15 +132,16 @@ function Invoke-PSTermEditProfile {
     $theme = $State.Theme
     $scale = Get-PSTermScale -Control $State.Form
 
-    $dialog = New-Object System.Windows.Forms.Form
+    $dialog = New-Object PSTerm.Render.ThemedForm
     $dialog.Text = if ($isNew) { 'New connection' } else { "Edit - $($Profile.name)" }
     $dialog.StartPosition = 'CenterParent'
     $dialog.FormBorderStyle = 'Sizable'
     $dialog.MinimizeBox = $false
     $dialog.MaximizeBox = $false
-    $dialog.Font = New-PSTermFont -Size 9
-    $dialog.Size = New-Object System.Drawing.Size([int](560 * $scale), [int](620 * $scale))
-    $dialog.MinimumSize = New-Object System.Drawing.Size([int](460 * $scale), [int](420 * $scale))
+    $dialog.Font = New-PSTermFont
+    $dialog.Size = New-Object System.Drawing.Size([int](580 * $scale), [int](640 * $scale))
+    $dialog.MinimumSize = New-Object System.Drawing.Size([int](480 * $scale), [int](440 * $scale))
+    $rowHeight = [int]($dialog.Font.Height * 1.85)
 
     # ---- general -------------------------------------------------------
     $general = New-PSTermFieldGrid
@@ -218,15 +229,30 @@ function Invoke-PSTermEditProfile {
     $autoHint.MaximumSize = New-Object System.Drawing.Size([int](480 * $scale), 0)
 
     # ---- assemble tabs --------------------------------------------------
-    $pages = New-Object System.Windows.Forms.TabControl
-    $pages.Dock = 'Fill'
+    # The same owner-drawn strip the main window uses, for the same reason:
+    # TabControl paints the band behind its tabs with the system visual style
+    # and ignores BackColor, leaving a white bar across a dark dialog.
+    $pageHost = New-Object PSTerm.Render.ThemedPanel
+    $pageHost.Dock = 'Fill'
 
-    function New-PSTermScrollPage {
-        param([string]$Title, [System.Windows.Forms.Control[]]$Contents)
-        $page = New-Object System.Windows.Forms.TabPage
-        $page.Text = $Title
+    $pageStrip = New-Object PSTerm.Render.TabStrip
+    $pageStrip.Dock = 'Top'
+    $pageStrip.Height = [int]($dialog.Font.Height * 2.0)
+    $pageStrip.Font = New-PSTermFont
+    $pageStrip.ShowCloseButtons = $false
+    $pageStrip.ShowNewTabButton = $false
+    $pageStrip.ShowStateDots = $false
+    $pageStrip.SizeToContent = $true
+    $pageStrip.MinTabWidth = [int](84 * $scale)
+    $pageStrip.MaxTabWidth = [int](190 * $scale)
+
+    function New-PSTermDialogPage {
+        param([System.Windows.Forms.Control[]]$Contents)
+        $page = New-Object PSTerm.Render.ThemedPanel
+        $page.Dock = 'Fill'
         $page.AutoScroll = $true
-        $page.Padding = New-Object System.Windows.Forms.Padding(4)
+        $page.Padding = New-Object System.Windows.Forms.Padding([int](4 * $scale))
+        $page.Visible = $false
         # Added in reverse: Dock=Top stacks in the opposite order to insertion.
         for ($i = $Contents.Count - 1; $i -ge 0; $i--) {
             $Contents[$i].Dock = 'Top'
@@ -235,42 +261,61 @@ function Invoke-PSTermEditProfile {
         $page
     }
 
-    $connectionPage = New-Object System.Windows.Forms.TabPage
-    $connectionPage.Text = 'Connection'
-    $connectionPage.AutoScroll = $true
-    $connectionPage.Padding = New-Object System.Windows.Forms.Padding(4)
-    foreach ($panel in @($shellGrid, $serialGrid, $telnetGrid, $sshGrid, $general)) {
-        $panel.Dock = 'Top'
-        $connectionPage.Controls.Add($panel)
-    }
+    $dialogPages = @(
+        @{ Title = 'Connection'; Page = (New-PSTermDialogPage @($general, $sshGrid, $telnetGrid, $serialGrid, $shellGrid)) }
+        @{ Title = 'Terminal';   Page = (New-PSTermDialogPage @($termGrid, $backspaceHint)) }
+        @{ Title = 'Logging';    Page = (New-PSTermDialogPage @($logGrid, $logHint)) }
+        @{ Title = 'Automation'; Page = (New-PSTermDialogPage @($autoGrid, $autoHint)) }
+    )
 
-    [void]$pages.TabPages.Add($connectionPage)
-    [void]$pages.TabPages.Add((New-PSTermScrollPage 'Terminal' @($termGrid, $backspaceHint)))
-    [void]$pages.TabPages.Add((New-PSTermScrollPage 'Logging'  @($logGrid, $logHint)))
-    [void]$pages.TabPages.Add((New-PSTermScrollPage 'Automation' @($autoGrid, $autoHint)))
+    foreach ($entry in $dialogPages) {
+        $pageHost.Controls.Add($entry.Page)
+        [void]$pageStrip.Add($entry.Title, $null)
+    }
+    $pageHost.Controls.Add($pageStrip)
+
+    $showPage = {
+        param($index)
+        for ($i = 0; $i -lt $dialogPages.Count; $i++) {
+            $dialogPages[$i].Page.Visible = ($i -eq $index)
+        }
+        if ($index -ge 0) { $dialogPages[$index].Page.BringToFront() }
+    }.GetNewClosure()
+
+    $pageStrip.Add_SelectedChanged({
+        param($sender, $e)
+        & $showPage $e.Index
+    }.GetNewClosure())
+
+    $pageStrip.SelectedIndex = 0
+    & $showPage 0
 
     # ---- buttons --------------------------------------------------------
-    $buttonRow = New-Object System.Windows.Forms.FlowLayoutPanel
+    $buttonRow = New-Object PSTerm.Render.ThemedPanel
     $buttonRow.Dock = 'Bottom'
-    $buttonRow.FlowDirection = 'RightToLeft'
-    $buttonRow.Height = [int](42 * $scale)
-    $buttonRow.Padding = New-Object System.Windows.Forms.Padding(8, 6, 8, 6)
+    $buttonRow.Height = $rowHeight + [int](16 * $scale)
+
+    $buttonFlow = New-Object System.Windows.Forms.FlowLayoutPanel
+    $buttonFlow.Dock = 'Fill'
+    $buttonFlow.FlowDirection = 'RightToLeft'
+    $buttonFlow.Padding = New-Object System.Windows.Forms.Padding([int](10 * $scale), [int](8 * $scale), [int](10 * $scale), [int](8 * $scale))
+    $buttonRow.Controls.Add($buttonFlow)
 
     $cancelButton = New-Object System.Windows.Forms.Button
     $cancelButton.Text = 'Cancel'
     $cancelButton.DialogResult = 'Cancel'
-    $cancelButton.Width = [int](90 * $scale)
+    $cancelButton.Width = [int](96 * $scale); $cancelButton.Height = $rowHeight
 
     $okButton = New-Object System.Windows.Forms.Button
     $okButton.Text = if ($isNew) { 'Create' } else { 'Save' }
     $okButton.DialogResult = 'OK'
-    $okButton.Width = [int](90 * $scale)
+    $okButton.Width = [int](96 * $scale); $okButton.Height = $rowHeight
 
-    $buttonRow.Controls.AddRange(@($okButton, $cancelButton))
+    $buttonFlow.Controls.AddRange(@($okButton, $cancelButton))
     $dialog.AcceptButton = $okButton
     $dialog.CancelButton = $cancelButton
 
-    $dialog.Controls.Add($pages)
+    $dialog.Controls.Add($pageHost)
     $dialog.Controls.Add($buttonRow)
 
     # Show only the panel for the selected transport.
@@ -285,6 +330,7 @@ function Invoke-PSTermEditProfile {
     & $updateVisibility
 
     Set-PSTermFormTheme -Control $dialog -Theme $theme
+    $dialog.Add_Shown({ Set-PSTermTitleBarTheme -Form $dialog -Dark ($theme.Mode -eq 'Dark') }.GetNewClosure())
 
     if ($dialog.ShowDialog($State.Form) -ne [System.Windows.Forms.DialogResult]::OK) {
         $dialog.Dispose()
@@ -431,11 +477,11 @@ function Show-PSTermCommandPalette {
         Add-Command "Connect: $($profile.name)" $target ([scriptblock]::Create("Connect-PSTermProfileById -State `$State -Id '$id'")).GetNewClosure()
     }
 
-    $palette = New-Object System.Windows.Forms.Form
+    $palette = New-Object PSTerm.Render.ThemedForm
     $palette.FormBorderStyle = 'None'
     $palette.StartPosition = 'Manual'
     $palette.ShowInTaskbar = $false
-    $palette.Font = New-PSTermFont -Size 10
+    $palette.Font = New-PSTermFont -Relative 1.05
     $palette.BackColor = $theme.Border
     $palette.Padding = New-Object System.Windows.Forms.Padding(1)
     $palette.Size = New-Object System.Drawing.Size([int](560 * $scale), [int](380 * $scale))
@@ -450,28 +496,72 @@ function Show-PSTermCommandPalette {
     $query = New-Object System.Windows.Forms.TextBox
     $query.Dock = 'Top'
     $query.BorderStyle = 'None'
-    $query.Font = New-PSTermFont -Size 12
+    $query.Font = New-PSTermFont -Relative 1.25
     $query.BackColor = $theme.Surface
     $query.ForeColor = $theme.Text
     $query.Height = [int](34 * $scale)
 
+    # The list lives in a clipping panel a scroll bar's width narrower than the
+    # ListBox itself, so the system scroll bar - which cannot be themed and would
+    # be a white stripe down the edge - is pushed out of view. A ThinScrollBar
+    # drives TopIndex in its place.
+    $systemScrollWidth = [System.Windows.Forms.SystemInformation]::VerticalScrollBarWidth
+
+    $listHost = New-Object PSTerm.Render.ThemedPanel
+    $listHost.Dock = 'Fill'
+    $listHost.BackColor = $theme.Surface
+
+    $listScroll = New-Object PSTerm.Render.ThinScrollBar
+    $listScroll.Dock = 'Right'
+    $listScroll.Width = [int](12 * $scale)
+    $listScroll.ApplyTheme((New-PSTermControlTheme -Theme $theme))
+    $listScroll.Visible = $false
+
     $list = New-Object System.Windows.Forms.ListBox
-    $list.Dock = 'Fill'
     $list.BorderStyle = 'None'
     $list.BackColor = $theme.Surface
     $list.ForeColor = $theme.Text
     $list.DrawMode = 'OwnerDrawFixed'
-    $list.ItemHeight = [int](30 * $scale)
+    $list.IntegralHeight = $false
+    $list.ItemHeight = [int]($palette.Font.Height * 1.9)
 
     $separator = New-Object System.Windows.Forms.Panel
     $separator.Dock = 'Top'
     $separator.Height = 1
     $separator.BackColor = $theme.Border
 
-    $inner.Controls.Add($list)
+    $listHost.Controls.Add($list)
+    $listHost.Controls.Add($listScroll)
+    $inner.Controls.Add($listHost)
     $inner.Controls.Add($separator)
     $inner.Controls.Add($query)
     $palette.Controls.Add($inner)
+
+    $layoutList = {
+        $barWidth = if ($listScroll.Visible) { $listScroll.Width } else { 0 }
+        $list.SetBounds(0, 0, ($listHost.ClientSize.Width - $barWidth + $systemScrollWidth), $listHost.ClientSize.Height)
+    }.GetNewClosure()
+
+    $syncScroll = {
+        $visibleRows = [Math]::Max(1, [int]($list.ClientSize.Height / $list.ItemHeight))
+        $needed = $list.Items.Count -gt $visibleRows
+        if ($listScroll.Visible -ne $needed) {
+            $listScroll.Visible = $needed
+            & $layoutList
+        }
+        if ($needed) {
+            $listScroll.Maximum = $list.Items.Count - 1
+            $listScroll.LargeChange = $visibleRows
+            $listScroll.Value = $list.TopIndex
+        }
+    }.GetNewClosure()
+
+    $listHost.Add_Resize({ & $layoutList; & $syncScroll }.GetNewClosure())
+    $listScroll.Add_ValueChanged({ if ($list.TopIndex -ne $listScroll.Value) { $list.TopIndex = $listScroll.Value } }.GetNewClosure())
+    # The ListBox scrolls itself on the wheel and on arrow keys, so the bar is
+    # refreshed from TopIndex rather than trying to intercept every path.
+    $list.Add_MouseWheel({ & $syncScroll }.GetNewClosure())
+    $list.Add_SelectedIndexChanged({ & $syncScroll }.GetNewClosure())
 
     $filtered = New-Object System.Collections.Generic.List[psobject]
 
@@ -488,6 +578,8 @@ function Show-PSTermCommandPalette {
         foreach ($command in $filtered) { [void]$list.Items.Add($command.Title) }
         $list.EndUpdate()
         if ($list.Items.Count -gt 0) { $list.SelectedIndex = 0 }
+        & $layoutList
+        & $syncScroll
     }.GetNewClosure()
 
     $list.Add_DrawItem({
@@ -500,22 +592,44 @@ function Show-PSTermCommandPalette {
         $brush = New-Object System.Drawing.SolidBrush($back)
         try { $e.Graphics.FillRectangle($brush, $e.Bounds) } finally { $brush.Dispose() }
 
-        $titleBrush = New-Object System.Drawing.SolidBrush($theme.Text)
-        $hintBrush = New-Object System.Drawing.SolidBrush($theme.TextMuted)
+        # The list is deliberately wider than its viewport so the untheme-able
+        # system scroll bar is clipped away, so right-aligned text has to be
+        # placed against the visible edge rather than against Bounds.Right.
+        $visibleRight = $e.Bounds.Right - $systemScrollWidth
+
+        # TextRenderer (GDI) rather than DrawString (GDI+), matching the rest of
+        # the application: GDI+ measures a little short here, which clipped the
+        # shortcut hints and swallowed spaces inside them.
+        $hintWidth = 0
+        $hintFont = $null
+        if ($command.Hint) {
+            $hintFont = New-PSTermFont -Relative 0.9
+            $hintWidth = [System.Windows.Forms.TextRenderer]::MeasureText(
+                $e.Graphics, $command.Hint, $hintFont,
+                (New-Object System.Drawing.Size([int]::MaxValue, [int]::MaxValue)),
+                'NoPrefix').Width
+        }
+
         try {
-            $e.Graphics.DrawString($command.Title, $sender.Font, $titleBrush,
-                ($e.Bounds.Left + 10), ($e.Bounds.Top + 5))
-            if ($command.Hint) {
-                $hintFont = New-PSTermFont -Size 8
-                try {
-                    $size = $e.Graphics.MeasureString($command.Hint, $hintFont)
-                    $e.Graphics.DrawString($command.Hint, $hintFont, $hintBrush,
-                        ($e.Bounds.Right - $size.Width - 10), ($e.Bounds.Top + 7))
-                }
-                finally { $hintFont.Dispose() }
+            $titleLeft = $e.Bounds.Left + 12
+            $titleWidth = [Math]::Max(20, $visibleRight - $titleLeft - $hintWidth - 20)
+            $titleRect = New-Object System.Drawing.Rectangle(
+                $titleLeft, $e.Bounds.Top, $titleWidth, $e.Bounds.Height)
+            [System.Windows.Forms.TextRenderer]::DrawText(
+                $e.Graphics, $command.Title, $sender.Font, $titleRect, $theme.Text,
+                'Left, VerticalCenter, NoPrefix, EndEllipsis')
+
+            if ($hintFont) {
+                $hintRect = New-Object System.Drawing.Rectangle(
+                    ($visibleRight - $hintWidth - 12), $e.Bounds.Top, $hintWidth, $e.Bounds.Height)
+                [System.Windows.Forms.TextRenderer]::DrawText(
+                    $e.Graphics, $command.Hint, $hintFont, $hintRect, $theme.TextMuted,
+                    'Left, VerticalCenter, NoPrefix')
             }
         }
-        finally { $titleBrush.Dispose(); $hintBrush.Dispose() }
+        finally {
+            if ($hintFont) { $hintFont.Dispose() }
+        }
     }.GetNewClosure())
 
     $invoke = {
@@ -565,35 +679,36 @@ function Show-PSTermFind {
     $theme = $State.Theme
     $scale = Get-PSTermScale -Control $State.Form
 
-    $dialog = New-Object System.Windows.Forms.Form
+    $dialog = New-Object PSTerm.Render.ThemedForm
     $dialog.Text = 'Find in scrollback'
     $dialog.FormBorderStyle = 'FixedToolWindow'
     $dialog.StartPosition = 'CenterParent'
-    $dialog.Font = New-PSTermFont -Size 9
-    $dialog.Size = New-Object System.Drawing.Size([int](420 * $scale), [int](150 * $scale))
+    $dialog.Font = New-PSTermFont
+    $dialog.Size = New-Object System.Drawing.Size([int](440 * $scale), [int](170 * $scale))
 
     $grid = New-PSTermFieldGrid
     $queryBox = Add-PSTermField $grid 'Find' (New-PSTermTextField '') $theme
     $caseBox = Add-PSTermField $grid '' (New-PSTermCheckField 'Match case' $false) $theme
 
+    $buttonHeight = [int]($dialog.Font.Height * 1.85)
     $row = New-Object System.Windows.Forms.FlowLayoutPanel
     $row.Dock = 'Bottom'
     $row.FlowDirection = 'RightToLeft'
-    $row.Height = [int](40 * $scale)
-    $row.Padding = New-Object System.Windows.Forms.Padding(8, 5, 8, 5)
+    $row.Height = $buttonHeight + [int](16 * $scale)
+    $row.Padding = New-Object System.Windows.Forms.Padding([int](10 * $scale), [int](8 * $scale), [int](10 * $scale), [int](8 * $scale))
 
     $closeButton = New-Object System.Windows.Forms.Button
     $closeButton.Text = 'Close'
     $closeButton.DialogResult = 'Cancel'
-    $closeButton.Width = [int](80 * $scale)
+    $closeButton.Width = [int](88 * $scale); $closeButton.Height = $buttonHeight
 
     $prevButton = New-Object System.Windows.Forms.Button
     $prevButton.Text = 'Previous'
-    $prevButton.Width = [int](80 * $scale)
+    $prevButton.Width = [int](88 * $scale); $prevButton.Height = $buttonHeight
 
     $nextButton = New-Object System.Windows.Forms.Button
     $nextButton.Text = 'Next'
-    $nextButton.Width = [int](80 * $scale)
+    $nextButton.Width = [int](88 * $scale); $nextButton.Height = $buttonHeight
 
     $row.Controls.AddRange(@($closeButton, $nextButton, $prevButton))
 
@@ -636,9 +751,7 @@ function Show-PSTermFind {
 function Show-PSTermMenu {
     param([Parameter(Mandatory)]$State, $Anchor)
 
-    $menu = New-Object System.Windows.Forms.ContextMenuStrip
-    $menu.BackColor = $State.Theme.Surface
-    $menu.ForeColor = $State.Theme.Text
+    $menu = New-PSTermMenu -Theme $State.Theme
 
     function Add-MenuItem { param([string]$Text, [scriptblock]$Action)
         $item = $menu.Items.Add($Text)
@@ -658,6 +771,44 @@ function Show-PSTermMenu {
     [void](Add-MenuItem 'About PSTerm' { Show-PSTermAbout -State $State }.GetNewClosure())
 
     $menu.Show($Anchor, 0, $Anchor.Height)
+}
+
+function Show-PSTermNewSessionMenu {
+    <#
+    .SYNOPSIS
+        The menu behind the plus button on the tab strip.
+    .DESCRIPTION
+        Offers the saved connections directly, rather than only a way to reach
+        the editor: opening a session someone has already set up is by far the
+        most common reason to want a new tab.
+    #>
+    param([Parameter(Mandatory)]$State, $Anchor)
+
+    $menu = New-PSTermMenu -Theme $State.Theme
+
+    $item = $menu.Items.Add('New connection...')
+    $item.Add_Click({ Invoke-PSTermEditProfile -State $State -Profile $null }.GetNewClosure())
+
+    $item = $menu.Items.Add('Type a destination   (Ctrl+T)')
+    $item.Add_Click({
+        $State.QuickBox.Focus() | Out-Null
+        $State.QuickBox.SelectAll()
+    }.GetNewClosure())
+
+    $profiles = @($State.Store.profiles | Sort-Object { [string]$_.folder }, { [string]$_.name })
+    if ($profiles.Count -gt 0) {
+        [void]$menu.Items.Add('-')
+        foreach ($profile in $profiles) {
+            $label = if ($profile.folder) { "$($profile.folder) / $($profile.name)" } else { [string]$profile.name }
+            $id = [string]$profile.id
+            $entry = $menu.Items.Add($label)
+            $entry.ToolTipText = Get-PSTermProfileTarget -Profile $profile
+            $entry.Add_Click(([scriptblock]::Create("Connect-PSTermProfileById -State `$State -Id '$id'")).GetNewClosure())
+        }
+    }
+
+    if ($Anchor) { $menu.Show($Anchor, [int]($Anchor.Width - 30), $Anchor.Height) }
+    else { $menu.Show([System.Windows.Forms.Cursor]::Position) }
 }
 
 function Invoke-PSTermToggleTheme {

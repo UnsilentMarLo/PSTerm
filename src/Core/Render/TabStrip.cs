@@ -73,6 +73,16 @@ namespace PSTerm.Render
         public int MaxTabWidth = 220;
         public int MinTabWidth = 90;
 
+        /// <summary>Show a close affordance on each tab. Off when the strip is
+        /// used to switch pages in a dialog rather than to hold sessions.</summary>
+        public bool ShowCloseButtons = true;
+        /// <summary>Show the trailing new-session button.</summary>
+        public bool ShowNewTabButton = true;
+        /// <summary>Show the connection-state dot.</summary>
+        public bool ShowStateDots = true;
+        /// <summary>Size tabs to their widest label instead of filling the strip.</summary>
+        public bool SizeToContent = false;
+
         private const int NewTabButtonWidth = 30;
 
         private ToolTip _toolTip;
@@ -167,12 +177,36 @@ namespace PSTerm.Render
         // Layout
         // =====================================================================
 
+        private int TrailingWidth
+        {
+            get { return ShowNewTabButton ? NewTabButtonWidth : 0; }
+        }
+
         private int TabWidth
         {
             get
             {
                 if (_items.Count == 0) return MaxTabWidth;
-                int available = Math.Max(0, Width - NewTabButtonWidth);
+
+                if (SizeToContent)
+                {
+                    // The widest label sets the width for all of them, so the
+                    // strip does not shuffle as the selection moves.
+                    int widest = MinTabWidth;
+                    using (Graphics g = CreateGraphics())
+                    {
+                        foreach (TabStripItem item in _items)
+                        {
+                            Size size = TextRenderer.MeasureText(g, item.Title, Font,
+                                new Size(int.MaxValue, int.MaxValue), TextFormatFlags.NoPrefix);
+                            int needed = size.Width + 28;
+                            if (needed > widest) widest = needed;
+                        }
+                    }
+                    return Math.Min(widest, MaxTabWidth);
+                }
+
+                int available = Math.Max(0, Width - TrailingWidth);
                 int ideal = available / _items.Count;
                 if (ideal > MaxTabWidth) ideal = MaxTabWidth;
                 if (ideal < MinTabWidth) ideal = MinTabWidth;
@@ -205,7 +239,7 @@ namespace PSTerm.Render
             int width = TabWidth;
             int left = index * width;
             int right = left + width;
-            int viewport = Math.Max(0, Width - NewTabButtonWidth);
+            int viewport = Math.Max(0, Width - TrailingWidth);
 
             if (left - _scrollOffset < 0) _scrollOffset = left;
             else if (right - _scrollOffset > viewport) _scrollOffset = right - viewport;
@@ -217,7 +251,11 @@ namespace PSTerm.Render
 
         private Rectangle NewTabBounds
         {
-            get { return new Rectangle(Width - NewTabButtonWidth, 0, NewTabButtonWidth, Height); }
+            get
+            {
+                if (!ShowNewTabButton) return Rectangle.Empty;
+                return new Rectangle(Width - NewTabButtonWidth, 0, NewTabButtonWidth, Height);
+            }
         }
 
         // =====================================================================
@@ -235,7 +273,7 @@ namespace PSTerm.Render
 
             LayoutTabs();
 
-            Rectangle clip = new Rectangle(0, 0, Math.Max(0, Width - NewTabButtonWidth), Height);
+            Rectangle clip = new Rectangle(0, 0, Math.Max(0, Width - TrailingWidth), Height);
             Region saved = g.Clip;
             g.SetClip(clip);
 
@@ -247,7 +285,7 @@ namespace PSTerm.Render
 
             g.Clip = saved;
 
-            DrawNewTabButton(g);
+            if (ShowNewTabButton) DrawNewTabButton(g);
 
             using (Pen border = new Pen(BorderColor))
                 g.DrawLine(border, 0, Height - 1, Width, Height - 1);
@@ -273,28 +311,33 @@ namespace PSTerm.Render
             using (Pen divider = new Pen(BorderColor))
                 g.DrawLine(divider, item.Bounds.Right - 1, 6, item.Bounds.Right - 1, Height - 7);
 
-            // A state dot makes a dead session obvious without reading the label.
-            int dotSize = 7;
-            Rectangle dot = new Rectangle(item.Bounds.Left + 10, (Height - dotSize) / 2, dotSize, dotSize);
-            Color dotColor;
-            switch (item.State)
+            int textLeft = item.Bounds.Left + 12;
+
+            if (ShowStateDots)
             {
-                case TabState.Connected: dotColor = ConnectedColor; break;
-                case TabState.Failed: dotColor = FailedColor; break;
-                case TabState.Disconnected: dotColor = DisconnectedColor; break;
-                default: dotColor = AccentColor; break;
-            }
-            if (item.State == TabState.Disconnected)
-            {
-                using (Pen pen = new Pen(dotColor, 1.4f)) g.DrawEllipse(pen, dot);
-            }
-            else
-            {
-                using (SolidBrush brush = new SolidBrush(dotColor)) g.FillEllipse(brush, dot);
+                // A state dot makes a dead session obvious without reading the label.
+                int dotSize = 7;
+                Rectangle dot = new Rectangle(item.Bounds.Left + 10, (Height - dotSize) / 2, dotSize, dotSize);
+                Color dotColor;
+                switch (item.State)
+                {
+                    case TabState.Connected: dotColor = ConnectedColor; break;
+                    case TabState.Failed: dotColor = FailedColor; break;
+                    case TabState.Disconnected: dotColor = DisconnectedColor; break;
+                    default: dotColor = AccentColor; break;
+                }
+                if (item.State == TabState.Disconnected)
+                {
+                    using (Pen pen = new Pen(dotColor, 1.4f)) g.DrawEllipse(pen, dot);
+                }
+                else
+                {
+                    using (SolidBrush brush = new SolidBrush(dotColor)) g.FillEllipse(brush, dot);
+                }
+                textLeft = dot.Right + 8;
             }
 
-            int textLeft = dot.Right + 8;
-            int textRight = item.CloseBounds.Left - 4;
+            int textRight = ShowCloseButtons ? (item.CloseBounds.Left - 4) : (item.Bounds.Right - 10);
             if (textRight > textLeft)
             {
                 using (StringFormat format = new StringFormat())
@@ -315,7 +358,7 @@ namespace PSTerm.Render
 
             // The close cross appears on hover or on the active tab, so a row of
             // inactive tabs is not a row of crosses.
-            if (selected || hovered)
+            if (ShowCloseButtons && (selected || hovered))
             {
                 bool closeHot = (index == _hoverCloseIndex);
                 if (closeHot)
@@ -361,12 +404,12 @@ namespace PSTerm.Render
             onClose = false;
             LayoutTabs();
 
-            if (location.X >= Width - NewTabButtonWidth) return -1;
+            if (ShowNewTabButton && location.X >= Width - NewTabButtonWidth) return -1;
 
             for (int i = 0; i < _items.Count; i++)
             {
                 if (!_items[i].Bounds.Contains(location)) continue;
-                bool showsClose = (i == _selectedIndex || i == _hoverIndex);
+                bool showsClose = ShowCloseButtons && (i == _selectedIndex || i == _hoverIndex);
                 onClose = showsClose && _items[i].CloseBounds.Contains(location);
                 return i;
             }
@@ -420,7 +463,7 @@ namespace PSTerm.Render
             if (index < 0) return;
 
             // Middle-click closes anywhere on the tab, as in a browser.
-            if (e.Button == MouseButtons.Middle || (e.Button == MouseButtons.Left && onClose))
+            if (ShowCloseButtons && (e.Button == MouseButtons.Middle || (e.Button == MouseButtons.Left && onClose)))
             {
                 RaiseClose(index);
                 return;
