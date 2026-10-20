@@ -86,6 +86,17 @@ namespace PSTerm.Backends
         private readonly HashSet<byte> _weWill = new HashSet<byte>();
         private readonly HashSet<byte> _theyWill = new HashSet<byte>();
         private readonly HashSet<byte> _weRefused = new HashSet<byte>();
+        private readonly HashSet<byte> _theyRefused = new HashSet<byte>();
+
+        // Options we have asked for and are waiting on. RFC 1143: the answer to our
+        // own request is not itself answered, or two ends that both follow the rule
+        // would acknowledge each other forever.
+        private readonly HashSet<byte> _askedWill = new HashSet<byte>();
+        private readonly HashSet<byte> _askedDo = new HashSet<byte>();
+
+        // The sets above are written by the reader thread and read by the UI thread
+        // (Resize, RemoteEcho). Held only to touch them, never across a socket write.
+        private readonly object _optionLock = new object();
 
         // Sub-negotiation accumulator
         private readonly List<byte> _subNegotiation = new List<byte>();
@@ -115,7 +126,7 @@ namespace PSTerm.Backends
         }
 
         /// <summary>True once the host has agreed to echo, so the UI can show local echo state.</summary>
-        public bool RemoteEcho { get { return _theyWill.Contains(OPT_ECHO); } }
+        public bool RemoteEcho { get { lock (_optionLock) { return _theyWill.Contains(OPT_ECHO); } } }
 
         public void SetInitialSize(int cols, int rows)
         {
@@ -123,33 +134,45 @@ namespace PSTerm.Backends
             if (rows > 0) _rows = rows;
         }
 
+        /// <summary>
+        /// Starts connecting and returns at once. The attempt - name lookup included,
+        /// which cannot be interrupted - runs on the reader thread, because this is
+        /// called from the UI thread and an unreachable host would otherwise freeze the
+        /// window for the whole timeout. A failure is reported as the session closing,
+        /// with the reason.
+        /// </summary>
         public void Connect()
         {
-            if (_client != null) return;
+            if (_readerThread != null) return;
 
             RaiseStatus("Connecting to " + _settings.Host + ":" + _settings.Port.ToString() + "...");
 
-            _client = new TcpClient();
-            _client.NoDelay = true;     // interactive traffic: latency beats throughput
-
-            IAsyncResult ar = _client.BeginConnect(_settings.Host, _settings.Port, null, null);
-            if (!ar.AsyncWaitHandle.WaitOne(_settings.ConnectTimeoutMs))
-            {
-                try { _client.Close(); } catch (Exception) { }
-                _client = null;
-                throw new IOException("Timed out connecting to " + _settings.Host +
-                                      ":" + _settings.Port.ToString() + ".");
-            }
-            _client.EndConnect(ar);
-
-            _stream = _client.GetStream();
-            RaiseStatus("Connected to " + _settings.Host + ":" + _settings.Port.ToString());
-
-            _readerThread = new Thread(ReadLoop);
+            _readerThread = new Thread(ConnectAndRead);
             _readerThread.IsBackground = true;
             _readerThread.Name = "PSTerm telnet reader";
             _readerThread.Start();
+        }
 
+        private void ConnectAndRead()
+        {
+            try
+            {
+                OpenSocket();
+            }
+            catch (Exception ex)
+            {
+                // Disconnect() closes the socket under a pending connect, which lands
+                // here as an exception nobody needs to hear about.
+                if (!_closing)
+                    RaiseClosed("Could not connect to " + _settings.Host + ":" +
+                                _settings.Port.ToString() + ": " + ex.Message, null);
+                return;
+            }
+
+            if (_closing) return;
+
+            // Negotiation is sent before the first read so the option bookkeeping is
+            // complete by the time the host's answers are parsed.
             if (_settings.ActiveNegotiation) StartNegotiation();
 
             if (_settings.KeepAliveSeconds > 0)
@@ -157,6 +180,27 @@ namespace PSTerm.Backends
                 int period = _settings.KeepAliveSeconds * 1000;
                 _keepAliveTimer = new Timer(OnKeepAlive, null, period, period);
             }
+
+            RaiseConnected("Connected to " + _settings.Host + ":" + _settings.Port.ToString());
+            ReadLoop();
+        }
+
+        private void OpenSocket()
+        {
+            TcpClient client = new TcpClient();
+            client.NoDelay = true;     // interactive traffic: latency beats throughput
+            _client = client;          // visible to Disconnect(), which can abort the attempt
+
+            IAsyncResult ar = client.BeginConnect(_settings.Host, _settings.Port, null, null);
+            if (!ar.AsyncWaitHandle.WaitOne(_settings.ConnectTimeoutMs))
+            {
+                try { client.Close(); } catch (Exception) { }
+                throw new IOException("timed out after " +
+                                      (_settings.ConnectTimeoutMs / 1000).ToString() + " seconds");
+            }
+            client.EndConnect(ar);
+
+            _stream = client.GetStream();
         }
 
         /// <summary>
@@ -166,16 +210,28 @@ namespace PSTerm.Backends
         /// </summary>
         private void StartNegotiation()
         {
-            SendCommand(WILL, OPT_TTYPE);
-            SendCommand(WILL, OPT_NAWS);
-            SendCommand(DO, OPT_SGA);
-            SendCommand(WILL, OPT_SGA);
-            SendCommand(DO, OPT_ECHO);
+            AskWill(OPT_TTYPE);
+            AskWill(OPT_NAWS);
+            AskDo(OPT_SGA);
+            AskWill(OPT_SGA);
+            AskDo(OPT_ECHO);
             if (_settings.Binary)
             {
-                SendCommand(WILL, OPT_BINARY);
-                SendCommand(DO, OPT_BINARY);
+                AskWill(OPT_BINARY);
+                AskDo(OPT_BINARY);
             }
+        }
+
+        private void AskWill(byte option)
+        {
+            lock (_optionLock) { _askedWill.Add(option); }
+            SendCommand(WILL, option);
+        }
+
+        private void AskDo(byte option)
+        {
+            lock (_optionLock) { _askedDo.Add(option); }
+            SendCommand(DO, option);
         }
 
         private void OnKeepAlive(object state)
@@ -298,48 +354,70 @@ namespace PSTerm.Backends
 
         private void HandleNegotiation(byte command, byte option)
         {
-            switch (command)
+            // Decide under the lock, answer outside it: a socket write must never be
+            // made while holding it.
+            byte reply = 0;
+            bool sendWindowSize = false;
+
+            lock (_optionLock)
             {
-                case WILL:
-                    // The host offers to do something.
-                    if (option == OPT_ECHO || option == OPT_SGA ||
-                        (option == OPT_BINARY && _settings.Binary) || option == OPT_STATUS)
-                    {
-                        if (_theyWill.Add(option)) SendCommand(DO, option);
-                    }
-                    else
-                    {
-                        SendCommand(DONT, option);
-                    }
-                    break;
-
-                case WONT:
-                    _theyWill.Remove(option);
-                    SendCommand(DONT, option);
-                    break;
-
-                case DO:
-                    // The host asks us to do something.
-                    if (option == OPT_TTYPE || option == OPT_NAWS || option == OPT_SGA ||
-                        (option == OPT_BINARY && _settings.Binary))
-                    {
-                        if (_weWill.Add(option))
+                switch (command)
+                {
+                    case WILL:
+                        // The host offers to do something.
+                        if (option == OPT_ECHO || option == OPT_SGA ||
+                            (option == OPT_BINARY && _settings.Binary) || option == OPT_STATUS)
                         {
-                            SendCommand(WILL, option);
-                            // NAWS carries no useful meaning until a size is sent.
-                            if (option == OPT_NAWS) SendWindowSize();
+                            if (_theyWill.Add(option))
+                            {
+                                // WILL in answer to our DO is the answer; only an
+                                // unprompted WILL gets a reply.
+                                if (!_askedDo.Remove(option)) reply = DO;
+                            }
                         }
-                    }
-                    else
-                    {
-                        if (_weRefused.Add(option)) SendCommand(WONT, option);
-                    }
-                    break;
+                        else if (_theyRefused.Add(option))
+                        {
+                            reply = DONT;
+                        }
+                        break;
 
-                case DONT:
-                    if (_weWill.Remove(option)) SendCommand(WONT, option);
-                    break;
+                    case WONT:
+                        _theyRefused.Remove(option);
+                        _askedDo.Remove(option);
+                        // Acknowledge only a change of state. Replying to a WONT for an
+                        // option that was never on is what starts a loop with a server
+                        // that answers every DONT.
+                        if (_theyWill.Remove(option)) reply = DONT;
+                        break;
+
+                    case DO:
+                        // The host asks us to do something.
+                        if (option == OPT_TTYPE || option == OPT_NAWS || option == OPT_SGA ||
+                            (option == OPT_BINARY && _settings.Binary))
+                        {
+                            if (_weWill.Add(option))
+                            {
+                                if (!_askedWill.Remove(option)) reply = WILL;
+                                // NAWS carries no useful meaning until a size is sent.
+                                if (option == OPT_NAWS) sendWindowSize = true;
+                            }
+                        }
+                        else if (_weRefused.Add(option))
+                        {
+                            reply = WONT;
+                        }
+                        break;
+
+                    case DONT:
+                        _weRefused.Remove(option);
+                        _askedWill.Remove(option);
+                        if (_weWill.Remove(option)) reply = WONT;
+                        break;
+                }
             }
+
+            if (reply != 0) SendCommand(reply, option);
+            if (sendWindowSize) SendWindowSize();
         }
 
         private void HandleSubNegotiation()
@@ -384,7 +462,7 @@ namespace PSTerm.Backends
         /// <summary>RFC 1073 NAWS. Dimensions are 16-bit big-endian and must be IAC-escaped.</summary>
         private void SendWindowSize()
         {
-            if (!_weWill.Contains(OPT_NAWS)) return;
+            lock (_optionLock) { if (!_weWill.Contains(OPT_NAWS)) return; }
 
             List<byte> message = new List<byte>(16);
             message.Add(IAC); message.Add(SB); message.Add(OPT_NAWS);
@@ -508,6 +586,12 @@ namespace PSTerm.Backends
         {
             EventHandler<BackendStatusEventArgs> h = Status;
             if (h != null) h(this, new BackendStatusEventArgs(message));
+        }
+
+        private void RaiseConnected(string message)
+        {
+            EventHandler<BackendStatusEventArgs> h = Status;
+            if (h != null) h(this, new BackendStatusEventArgs(message, true));
         }
 
         private void RaiseClosed(string reason, int? exitCode)

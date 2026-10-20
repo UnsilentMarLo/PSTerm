@@ -326,7 +326,7 @@ function New-PSTermMainWindow {
         Set-PSTermTitleBarTheme -Form $state.Form -Dark ($state.Theme.Mode -eq 'Dark')
         Update-PSTermTree -State $state
         $state.QuickBox.Focus() | Out-Null
-        Set-PSTermStatusMessage -State $state -Message 'Ctrl+K for the command palette. Type a destination above and press Enter.'
+        Set-PSTermStatusMessage -State $state -Message 'Ctrl+Shift+P for the command palette. Type a destination above and press Enter.'
     }.GetNewClosure())
 
     # The caller needs the state to open a session from the command line.
@@ -374,9 +374,12 @@ function Update-PSTermTree {
 
         $profiles = @($State.Store.profiles)
         if ($filter) {
+            # -like treats [ ] * ? as wildcards, and a lone [ is an invalid pattern
+            # that throws. Searching for "[lab" must mean those characters.
+            $pattern = '*' + [System.Management.Automation.WildcardPattern]::Escape($filter) + '*'
             $profiles = @($profiles | Where-Object {
                 $target = Get-PSTermProfileTarget -Profile $_
-                ($_.name -like "*$filter*") -or ($target -like "*$filter*") -or ($_.folder -like "*$filter*")
+                ($_.name -like $pattern) -or ($target -like $pattern) -or ($_.folder -like $pattern)
             })
         }
 
@@ -534,6 +537,7 @@ function New-PSTermSessionTab {
         Closed      = $false
         Logger      = $null
         RemoteTitle = ''
+        AutoInputStarted = $false
     }
     $State.Tabs.Add($tab)
     $item.Tag = $tab
@@ -549,10 +553,15 @@ function New-PSTermSessionTab {
         $session.SynchronizingObject = $terminal
         $tab.Session = $session
 
-        $logger = New-PSTermLogger -Profile $Profile -Root $State.Root
+        $loggerFailure = ''
+        $logger = New-PSTermLogger -Profile $Profile -Root $State.Root -Failure ([ref]$loggerFailure)
         if ($logger) {
             $session.Logger = $logger
             $tab.Logger = $logger
+        }
+        elseif ($loggerFailure) {
+            $terminal.Feed("`r`n  Logging is on for this profile but could not be started:`r`n  $loggerFailure`r`n`r`n")
+            Set-PSTermStatusMessage -State $State -Message "Logging could not be started: $loggerFailure" -Level Warning
         }
 
         # Keystrokes and terminal replies both arrive as Input.
@@ -565,6 +574,18 @@ function New-PSTermSessionTab {
             param($sender, $e)
             if ($tab.Session) { $tab.Session.Resize($e.Cols, $e.Rows) }
             Update-PSTermStatus -State $State
+        }.GetNewClosure())
+
+        # Multi-line paste into a terminal that has not asked for bracketed paste runs
+        # every line as it lands. Ask first.
+        $terminal.Add_PasteRequested({
+            param($sender, $e)
+            $current = Import-PSTermSettings -Root $State.Root
+            if (-not $current.confirmMultilinePaste) { return }
+            $answer = Show-PSTermMessage -Theme $State.Theme -Owner $State.Form `
+                -Title 'Paste' -Buttons YesNo `
+                -Message "Paste $($e.LineCount) lines? Each line break is sent as Enter, so every line runs as soon as it arrives."
+            if ($answer -ne 'Yes') { $e.Cancel = $true }
         }.GetNewClosure())
 
         $terminal.Add_TitleChanged({
@@ -587,18 +608,28 @@ function New-PSTermSessionTab {
             Set-PSTermStatusMessage -State $State -Message $e.Message
         }.GetNewClosure())
 
+        # Raised when the link is actually up. Telnet connects in the background, so
+        # Connect() returning says nothing about it; the dot stays amber until then.
+        $session.Add_Connected({
+            param($sender, $e)
+            if ($tab.Closed) { return }
+            $tab.Item.State = [PSTerm.Render.TabState]::Connected
+            $State.TabStrip.Invalidate()
+            Update-PSTermStatus -State $State
+            Set-PSTermStatusMessage -State $State -Message "Connected: $(Get-PSTermProfileTarget -Profile $tab.Profile)"
+
+            # Lines to send once connected. Never put a password here: profiles.json
+            # is plain text.
+            if (-not $tab.AutoInputStarted) {
+                $tab.AutoInputStarted = $true
+                $autoInput = @($tab.Profile.autoInput | Where-Object { $_ })
+                if ($autoInput.Count -gt 0) {
+                    Start-PSTermAutoInput -Tab $tab -Lines $autoInput
+                }
+            }
+        }.GetNewClosure())
+
         $session.Connect()
-        $item.State = [PSTerm.Render.TabState]::Connected
-        $State.TabStrip.Invalidate()
-
-        # Lines to send once connected. Never put a password here; the credential
-        # store exists for that and is encrypted.
-        $autoInput = @($Profile.autoInput | Where-Object { $_ })
-        if ($autoInput.Count -gt 0) {
-            Start-PSTermAutoInput -Tab $tab -Lines $autoInput
-        }
-
-        Set-PSTermStatusMessage -State $State -Message "Connected: $(Get-PSTermProfileTarget -Profile $Profile)"
     }
     catch {
         $tab.Closed = $true
@@ -617,8 +648,14 @@ function New-PSTermSessionTab {
 function Start-PSTermAutoInput {
     <#
     .SYNOPSIS
-        Send saved lines after connecting, paced so a device's prompt can keep up.
+        Send saved lines after connecting, one at a time, as the device becomes ready.
     .DESCRIPTION
+        A line goes out once the device has said something new and then gone quiet,
+        which is what a prompt looks like from outside. A fixed delay either races
+        ahead of a slow login banner or waits needlessly on a fast one. A device that
+        never says anything (a serial console waiting for a keypress) gets the line
+        after a few seconds anyway.
+
         Uses a UI timer rather than Start-Sleep: blocking the UI thread here would
         freeze the window and stop the terminal painting the very output being
         waited for.
@@ -628,15 +665,30 @@ function Start-PSTermAutoInput {
     $queue = New-Object System.Collections.Generic.Queue[string]
     foreach ($line in $Lines) { $queue.Enqueue($line) }
 
+    $quietMs = 400
+    $giveUpMs = 4000
+    $wait = [pscustomobject]@{
+        Clock = [System.Diagnostics.Stopwatch]::StartNew()
+        Seen  = $Tab.Session.DataChunks
+    }
+
     $timer = New-Object System.Windows.Forms.Timer
-    $timer.Interval = 350
+    $timer.Interval = 100
     $timer.Add_Tick({
         if ($queue.Count -eq 0 -or -not $Tab.Session -or $Tab.Closed) {
             $timer.Stop()
             $timer.Dispose()
             return
         }
-        $Tab.Session.Send(($queue.Dequeue() + "`r"))
+
+        $session = $Tab.Session
+        $heardSomething = $session.DataChunks -gt $wait.Seen
+        $ready = $heardSomething -and ($session.IdleMilliseconds -ge $quietMs)
+        if (-not $ready -and $wait.Clock.ElapsedMilliseconds -lt $giveUpMs) { return }
+
+        $session.Send(($queue.Dequeue() + "`r"))
+        $wait.Seen = $session.DataChunks
+        $wait.Clock.Restart()
     }.GetNewClosure())
     $timer.Start()
 }
@@ -644,14 +696,17 @@ function Start-PSTermAutoInput {
 function Complete-PSTermTab {
     param($State, $Tab, [string]$Reason, $ExitCode)
 
+    # A session that ends before it ever connected failed; one that ends afterwards
+    # was disconnected. The dot tells them apart.
+    $neverConnected = ($Tab.Item.State -eq [PSTerm.Render.TabState]::Connecting)
     $Tab.Closed = $true
-    $Tab.Item.State = [PSTerm.Render.TabState]::Disconnected
+    $Tab.Item.State = if ($neverConnected) { [PSTerm.Render.TabState]::Failed } else { [PSTerm.Render.TabState]::Disconnected }
 
     $note = if ($Reason) { "Session ended: $Reason" }
             elseif ($null -ne $ExitCode -and $ExitCode -ne 0) { "Session ended (exit code $ExitCode)" }
             else { 'Session ended.' }
 
-    try { $Tab.Control.Feed("`r`n`r`n  --- $note Press Ctrl+R to reconnect, Ctrl+W to close. ---`r`n") } catch { }
+    try { $Tab.Control.Feed("`r`n`r`n  --- $note Press Ctrl+Shift+R to reconnect, Ctrl+Shift+W to close. ---`r`n") } catch { }
 
     $State.TabStrip.Invalidate()
     Update-PSTermStatus -State $State
@@ -671,7 +726,10 @@ function Restart-PSTermTab {
     $profile = $tab.Profile
     $index = $State.TabStrip.IndexOf($tab.Item)
     Close-PSTermTab -State $State -Index $index -Force
-    New-PSTermSessionTab -State $State -Profile $profile
+    New-PSTermSessionTab -State $State -Profile $profile | Out-Null
+
+    # The new tab is appended; put it back where the old one was.
+    $State.TabStrip.MoveItem($State.TabStrip.Count - 1, [Math]::Min($index, $State.TabStrip.Count - 1))
 }
 
 # =============================================================================
@@ -809,12 +867,16 @@ function Invoke-PSTermShortcut {
 
     $ctrl = $EventArgs.Control
     $shift = $EventArgs.Shift
+    $alt = $EventArgs.Alt
 
-    # Ctrl+Shift+C/V belong to the terminal for copy and paste; everything claimed
-    # here would otherwise be unreachable once the terminal has focus.
-    if ($ctrl -and -not $shift) {
+    # Application commands live on Ctrl+Shift, the way Windows Terminal does it.
+    # Plain Ctrl+letter belongs to the device: Ctrl+R is reverse search, Ctrl+W
+    # deletes a word, Ctrl+L clears the screen, Ctrl+K kills to end of line. A
+    # terminal that claims them is unusable for exactly the work it exists for.
+    # Ctrl+Shift+C/V are left alone because the terminal handles copy and paste.
+    if ($ctrl -and $shift -and -not $alt) {
         switch ($EventArgs.KeyCode) {
-            ([System.Windows.Forms.Keys]::K) {
+            ([System.Windows.Forms.Keys]::P) {
                 $EventArgs.SuppressKeyPress = $true
                 Show-PSTermCommandPalette -State $State
                 return
@@ -848,25 +910,26 @@ function Invoke-PSTermShortcut {
             }
             ([System.Windows.Forms.Keys]::Tab) {
                 $EventArgs.SuppressKeyPress = $true
-                Select-PSTermNextTab -State $State -Delta 1
+                Select-PSTermNextTab -State $State -Delta -1
                 return
             }
         }
-    }
 
-    if ($ctrl -and $shift -and $EventArgs.KeyCode -eq [System.Windows.Forms.Keys]::Tab) {
-        $EventArgs.SuppressKeyPress = $true
-        Select-PSTermNextTab -State $State -Delta -1
+        # Ctrl+Shift+1..9 jumps straight to a tab.
+        if ($EventArgs.KeyCode -ge [System.Windows.Forms.Keys]::D1 -and $EventArgs.KeyCode -le [System.Windows.Forms.Keys]::D9) {
+            $index = [int]$EventArgs.KeyCode - [int][System.Windows.Forms.Keys]::D1
+            if ($index -lt $State.TabStrip.Count) {
+                $EventArgs.SuppressKeyPress = $true
+                $State.TabStrip.SelectedIndex = $index
+            }
+        }
         return
     }
 
-    # Ctrl+1..9 jumps straight to a tab.
-    if ($ctrl -and $EventArgs.KeyCode -ge [System.Windows.Forms.Keys]::D1 -and $EventArgs.KeyCode -le [System.Windows.Forms.Keys]::D9) {
-        $index = [int]$EventArgs.KeyCode - [int][System.Windows.Forms.Keys]::D1
-        if ($index -lt $State.TabStrip.Count) {
-            $EventArgs.SuppressKeyPress = $true
-            $State.TabStrip.SelectedIndex = $index
-        }
+    # Ctrl+Tab cycles tabs. It has no control code, so nothing is taken from the device.
+    if ($ctrl -and -not $shift -and -not $alt -and $EventArgs.KeyCode -eq [System.Windows.Forms.Keys]::Tab) {
+        $EventArgs.SuppressKeyPress = $true
+        Select-PSTermNextTab -State $State -Delta 1
     }
 }
 

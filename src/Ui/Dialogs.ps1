@@ -437,7 +437,7 @@ function Invoke-PSTermDeleteProfile {
 function Show-PSTermCommandPalette {
     <#
     .SYNOPSIS
-        Ctrl+K: one search box over commands and saved connections.
+        Ctrl+Shift+P: one search box over commands and saved connections.
     .DESCRIPTION
         Keeps common actions reachable without hunting through menus, which is the
         main navigation complaint about PuTTY's dialog-first design.
@@ -454,10 +454,10 @@ function Show-PSTermCommandPalette {
         $commands.Add([pscustomobject]@{ Title = $Title; Hint = $Hint; Action = $Action }) }
 
     Add-Command 'New connection...'      'Create a saved profile'      { Invoke-PSTermEditProfile -State $State -Profile $null }.GetNewClosure()
-    Add-Command 'Close tab'              'Ctrl+W'                      { Close-PSTermTab -State $State }.GetNewClosure()
-    Add-Command 'Reconnect tab'          'Ctrl+R'                      { Restart-PSTermTab -State $State }.GetNewClosure()
-    Add-Command 'Clear scrollback'       'Ctrl+L'                      { $t = Get-PSTermActiveTab -State $State; if ($t) { $t.Control.ClearScrollback() } }.GetNewClosure()
-    Add-Command 'Find in scrollback...'  'Ctrl+F'                      { Show-PSTermFind -State $State }.GetNewClosure()
+    Add-Command 'Close tab'              'Ctrl+Shift+W' { Close-PSTermTab -State $State }.GetNewClosure()
+    Add-Command 'Reconnect tab'          'Ctrl+Shift+R' { Restart-PSTermTab -State $State }.GetNewClosure()
+    Add-Command 'Clear scrollback'       'Ctrl+Shift+L' { $t = Get-PSTermActiveTab -State $State; if ($t) { $t.Control.ClearScrollback() } }.GetNewClosure()
+    Add-Command 'Find in scrollback...'  'Ctrl+Shift+F' { Show-PSTermFind -State $State }.GetNewClosure()
     Add-Command 'Copy selection'         'Ctrl+Shift+C'                { $t = Get-PSTermActiveTab -State $State; if ($t) { $t.Control.CopySelection() } }.GetNewClosure()
     Add-Command 'Paste'                  'Ctrl+Shift+V'                { $t = Get-PSTermActiveTab -State $State; if ($t) { $t.Control.PasteClipboard() } }.GetNewClosure()
     Add-Command 'Select all'             ''                            { $t = Get-PSTermActiveTab -State $State; if ($t) { $t.Control.SelectAll() } }.GetNewClosure()
@@ -756,7 +756,7 @@ function Show-PSTermMenu {
         $item
     }
 
-    [void](Add-MenuItem 'Command palette   (Ctrl+K)' { Show-PSTermCommandPalette -State $State }.GetNewClosure())
+    [void](Add-MenuItem 'Command palette   (Ctrl+Shift+P)' { Show-PSTermCommandPalette -State $State }.GetNewClosure())
     [void]$menu.Items.Add('-')
     [void](Add-MenuItem 'New connection...' { Invoke-PSTermEditProfile -State $State -Profile $null }.GetNewClosure())
     [void](Add-MenuItem 'Import PuTTY sessions' { Invoke-PSTermImportPutty -State $State }.GetNewClosure())
@@ -786,7 +786,7 @@ function Show-PSTermNewSessionMenu {
     $item = $menu.Items.Add('New connection...')
     $item.Add_Click({ Invoke-PSTermEditProfile -State $State -Profile $null }.GetNewClosure())
 
-    $item = $menu.Items.Add('Type a destination   (Ctrl+T)')
+    $item = $menu.Items.Add('Type a destination   (Ctrl+Shift+T)')
     $item.Add_Click({
         $State.QuickBox.Focus() | Out-Null
         $State.QuickBox.SelectAll()
@@ -906,14 +906,14 @@ OpenSSH client : $sshState
 Install folder : $($State.Root)
 
 Keyboard
-  Ctrl+K          Command palette
-  Ctrl+T          Focus the quick-connect bar
-  Ctrl+W          Close tab
-  Ctrl+R          Reconnect tab
-  Ctrl+L          Clear scrollback
-  Ctrl+F          Find in scrollback
-  Ctrl+Tab        Next tab
-  Ctrl+1..9       Go to tab
+  Ctrl+Shift+P    Command palette
+  Ctrl+Shift+T    Focus the quick-connect bar
+  Ctrl+Shift+W    Close tab
+  Ctrl+Shift+R    Reconnect tab
+  Ctrl+Shift+L    Clear scrollback
+  Ctrl+Shift+F    Find in scrollback
+  Ctrl+Tab        Next tab (Ctrl+Shift+Tab: previous)
+  Ctrl+Shift+1..9 Go to tab
   Ctrl+Shift+C/V  Copy and paste
   Shift+PgUp/PgDn Scroll back
 "@

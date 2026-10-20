@@ -57,14 +57,15 @@ put on a share or a USB stick.
 - Tabs with a close button and a connection-state dot.
 - Quick-connect bar: type `admin@switch1`, `host:2222`, `telnet ts1 2004`,
   `COM3:115200` or `cmd` and press Enter.
-- Command palette on `Ctrl+K`.
+- Command palette on `Ctrl+Shift+P`.
 - Session tree with **folders** and a search box.
 - Import from the PuTTY registry and from `~/.ssh/config`.
 - Dark and light themes; DPI-aware at any display scaling.
 
 **Logging**
 
-Per-line timestamps, raw or plain text, size-based rotation, and templated paths
+Per-line timestamps, raw or plain text, size-based rotation (`name.1.log`,
+`name.2.log`...), and templated paths
 so every device writes its own dated file with no per-session setup:
 
 ```
@@ -72,7 +73,9 @@ Logs\{host}\{name}-{date}.log
 ```
 
 Supported tokens: `{name}`, `{host}`, `{user}`, `{port}`, `{date}`, `{time}`,
-`{datetime}`. Passwords typed after a password prompt are masked.
+`{datetime}`. Passwords typed after a password prompt are masked in every format,
+raw included. A second tab that would write to a file already in use takes a
+numbered name (`name-2.log`) rather than going unlogged.
 
 ---
 
@@ -95,19 +98,26 @@ the above are present.
 
 | | |
 |---|---|
-| `Ctrl+K` | Command palette |
-| `Ctrl+T` | Focus the quick-connect bar |
-| `Ctrl+W` | Close tab |
-| `Ctrl+R` | Reconnect tab |
-| `Ctrl+L` | Clear scrollback |
-| `Ctrl+F` | Find in scrollback |
-| `Ctrl+Tab` | Next tab |
-| `Ctrl+1`…`9` | Go to tab |
+| `Ctrl+Shift+P` | Command palette |
+| `Ctrl+Shift+T` | Focus the quick-connect bar |
+| `Ctrl+Shift+W` | Close tab |
+| `Ctrl+Shift+R` | Reconnect tab |
+| `Ctrl+Shift+L` | Clear scrollback |
+| `Ctrl+Shift+F` | Find in scrollback |
+| `Ctrl+Tab` / `Ctrl+Shift+Tab` | Next / previous tab |
+| `Ctrl+Shift+1`…`9` | Go to tab |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy and paste |
 | `Shift+PgUp` / `Shift+PgDn` | Scroll back |
 
-Escape, function keys, Alt and every control combination go to the device, not to
-the application.
+Application commands sit on `Ctrl+Shift`. Everything else - Escape, function keys,
+Alt, and every plain `Ctrl` combination (`Ctrl+R` reverse search, `Ctrl+W`, `Ctrl+L`,
+`Ctrl+C`...) - goes to the device, not to the application.
+
+Pasting several lines into a terminal that has not asked for bracketed paste asks
+for confirmation first, because each line break runs a command. Turn that off with
+`"confirmMultilinePaste": false` in `Profiles\settings.json`. Control characters,
+including the escape sequence that ends a bracketed paste, are stripped from pasted
+text.
 
 ---
 
@@ -116,7 +126,9 @@ the application.
 ```
 Profiles\profiles.json      saved connections
 Profiles\settings.json      application settings
-Profiles\credentials.dat    DPAPI-encrypted, current user and machine only
+Profiles\credentials.dat    DPAPI-encrypted store, current user and machine only
+                            (not yet used to log in - see below)
+Logs\psterm-errors.log     unexpected errors, if any
 Logs\                       session logs, unless a profile says otherwise
 bin\                        compiled core, regenerated whenever the source changes
 ```
@@ -125,6 +137,13 @@ Everything lives in the install folder, so the whole thing is portable. Secrets
 deliberately are not: DPAPI ties them to the Windows account that created them, so
 copying the folder to another machine carries the connections but not the
 passwords.
+
+PSTerm does not store or send passwords today: `ssh` and the device ask in the
+terminal, and the credential store exists for a later release. Do not put a password
+in a profile's auto-input lines - that file is plain text. Use an SSH key.
+
+`Profiles\profiles.json` is not tracked by git, since it holds your real hostnames.
+PSTerm creates a starter file on first run.
 
 An existing v1 `profiles.json` is migrated automatically on first run, and the
 original is kept as `profiles.json.v1-backup`.

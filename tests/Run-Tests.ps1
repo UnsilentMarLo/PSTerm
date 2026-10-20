@@ -830,6 +830,111 @@ Test-Case 'a NOP command is consumed without producing data' {
     Assert-Equal 'AB' (Invoke-Telnet $t ([byte[]]@(65, $IAC, $NOP, 66)))
 }
 
+Test-Case 'a WONT for an option that was never on is not answered' {
+    # Answering it is what lets two ends that both answer everything loop forever.
+    $t = New-Telnet
+    [void](Invoke-Telnet $t ([byte[]]@($IAC, $WONT, 99)))
+    Assert-Equal 0 (Get-Sent $t).Length
+}
+
+Test-Case 'an unsupported option is refused once, however often it is offered' {
+    $t = New-Telnet
+    [void](Invoke-Telnet $t ([byte[]]@($IAC, $WILL, 99)))
+    [void](Invoke-Telnet $t ([byte[]]@($IAC, $WILL, 99)))
+    Assert-Equal 3 (Get-Sent $t).Length
+}
+
+Test-Case 'a WONT after the option was agreed is acknowledged' {
+    $t = New-Telnet
+    [void](Invoke-Telnet $t ([byte[]]@($IAC, $WILL, $O_ECHO)))
+    [void](Invoke-Telnet $t ([byte[]]@($IAC, $WONT, $O_ECHO)))
+    Assert-Contains3 (Get-Sent $t) $IAC $DONT $O_ECHO 'DONT ECHO'
+    Assert-True (-not $t.Backend.RemoteEcho) 'remote echo should be cleared'
+}
+
+Test-Case 'the host answering our own requests is not answered in turn' {
+    $t = New-Telnet
+    $t.Backend.TestStartNegotiation()
+    $before = (Get-Sent $t).Length
+    # The host agrees to everything we asked for.
+    [void](Invoke-Telnet $t ([byte[]]@(
+        $IAC, $WILL, $O_SGA,  $IAC, $DO, $O_SGA,
+        $IAC, $WILL, $O_ECHO, $IAC, $DO, $O_TTYPE,
+        $IAC, $WILL, $O_BIN,  $IAC, $DO, $O_BIN)))
+    Assert-Equal $before (Get-Sent $t).Length 'agreeing to a request must not produce a further reply'
+}
+
+Test-Case 'a host refusing our request is not answered' {
+    $t = New-Telnet
+    $t.Backend.TestStartNegotiation()
+    $before = (Get-Sent $t).Length
+    [void](Invoke-Telnet $t ([byte[]]@($IAC, $WONT, $O_ECHO, $IAC, $DONT, $O_TTYPE)))
+    Assert-Equal $before (Get-Sent $t).Length
+}
+
+# ------------------------------------------------- Ctrl and Alt key path ----
+
+Write-Host "`nCtrl and Alt keys" -ForegroundColor Yellow
+
+$KC = [System.Windows.Forms.Keys]
+$TC = [PSTerm.Render.TerminalControl]
+
+Test-Case 'Ctrl+letter is translated to the letter, for the encoder to turn into a control code' {
+    Assert-Equal 'c' ($TC::ModifiedKeyChar($KC::C, $M::Control))
+    Assert-Equal 'z' ($TC::ModifiedKeyChar($KC::Z, $M::Control -bor $M::Shift))
+    Assert-Equal "$([char]3)" ($ke.Encode($K::Char, $TC::ModifiedKeyChar($KC::C, $M::Control), $M::Control, $false, $false))
+}
+
+Test-Case 'Alt+letter keeps its case and gets the ESC prefix' {
+    Assert-Equal 'f' ($TC::ModifiedKeyChar($KC::F, $M::Alt))
+    Assert-Equal 'F' ($TC::ModifiedKeyChar($KC::F, $M::Alt -bor $M::Shift))
+    Assert-Equal "${ESC}f" ($ke.Encode($K::Char, 'f', $M::Alt, $false, $false))
+}
+
+Test-Case 'Ctrl+Alt is AltGr and is left to produce its character' {
+    Assert-Equal ([char]0) ($TC::ModifiedKeyChar($KC::Q, $M::Control -bor $M::Alt))
+    Assert-Equal ([char]0) ($TC::ModifiedKeyChar($KC::D7, $M::Control -bor $M::Alt))
+}
+
+Test-Case 'Ctrl+Space is NUL, Alt+Space is left to Windows' {
+    Assert-Equal ' ' ($TC::ModifiedKeyChar($KC::Space, $M::Control))
+    Assert-Equal ([char]0) ($TC::ModifiedKeyChar($KC::Space, $M::Alt))
+}
+
+Test-Case 'only the Ctrl+digits that have a control code are translated' {
+    Assert-Equal '2' ($TC::ModifiedKeyChar($KC::D2, $M::Control))
+    Assert-Equal '8' ($TC::ModifiedKeyChar($KC::D8, $M::Control))
+    Assert-Equal ([char]0) ($TC::ModifiedKeyChar($KC::D1, $M::Control))
+    Assert-Equal ([char]0) ($TC::ModifiedKeyChar($KC::D9, $M::Control))
+}
+
+Test-Case 'a plain key is not a modified key' {
+    Assert-Equal ([char]0) ($TC::ModifiedKeyChar($KC::C, $M::None))
+    Assert-Equal ([char]0) ($TC::ModifiedKeyChar($KC::ControlKey, $M::Control))
+}
+
+# ------------------------------------------------------------------ paste ---
+
+Write-Host "`nPaste" -ForegroundColor Yellow
+
+Test-Case 'pasted text cannot carry the escape that ends a bracketed paste' {
+    $hostile = "ls${ESC}[201~; rm -rf ~"
+    $clean = $TC::StripPasteControls($hostile)
+    Assert-True ($clean -notmatch "$ESC") 'ESC must not survive'
+    Assert-Equal 'ls[201~; rm -rf ~' $clean
+}
+
+Test-Case 'tabs and line breaks survive paste sanitising, other controls do not' {
+    $text = "a`tb`rc$([char]3)$([char]127)d"
+    Assert-Equal "a`tb`rcd" ($TC::StripPasteControls($text))
+}
+
+Test-Case 'ordinary text is returned untouched' {
+    # Built from code points: Windows PowerShell reads a BOM-less script as ANSI.
+    $text = "plain text, $([char]0x00FC)n$([char]0x00EF)code $([char]0x2713)"
+    Assert-Equal $text ($TC::StripPasteControls($text))
+}
+
 # ---------------------------------------------------------------- summary ---
 
 

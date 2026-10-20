@@ -51,6 +51,16 @@ namespace PSTerm.Render
         public TerminalInputEventArgs(string text) { Text = text; }
     }
 
+    /// <summary>Raised before multi-line text is pasted into a terminal that has not
+    /// asked for bracketed paste, so the operator can cancel it.</summary>
+    public class TerminalPasteEventArgs : EventArgs
+    {
+        public readonly string Text;
+        public readonly int LineCount;
+        public bool Cancel;
+        public TerminalPasteEventArgs(string text, int lineCount) { Text = text; LineCount = lineCount; }
+    }
+
     /// <summary>GDI entry points used by the batched text path.</summary>
     internal static class Gdi
     {
@@ -151,6 +161,7 @@ namespace PSTerm.Render
         public event EventHandler<TerminalResizeEventArgs> TerminalResized;
         public event EventHandler<EventArgs> BellRang;
         public event EventHandler<TerminalInputEventArgs> TitleChanged;
+        public event EventHandler<TerminalPasteEventArgs> PasteRequested;
 
         public TerminalControl()
         {
@@ -1102,7 +1113,16 @@ namespace PSTerm.Render
             }
 
             TermKey key = MapKey(e.KeyCode);
-            if (key == TermKey.None) return;      // a plain character: handled in OnKeyPress
+            char ch = '\0';
+            if (key == TermKey.None)
+            {
+                // A plain character is handled in OnKeyPress. Ctrl+key and Alt+key are
+                // not: Windows delivers little or nothing useful for them there, so the
+                // key code is translated here instead.
+                ch = ModifiedKeyChar(e.KeyCode, mods);
+                if (ch == '\0') return;
+                key = ch == ' ' ? TermKey.Space : TermKey.Char;
+            }
 
             bool appCursor, appKeypad;
             lock (_sync)
@@ -1111,7 +1131,7 @@ namespace PSTerm.Render
                 appKeypad = _term.ApplicationKeypad;
             }
 
-            string seq = _keys.Encode(key, '\0', mods, appCursor, appKeypad);
+            string seq = _keys.Encode(key, ch, mods, appCursor, appKeypad);
             if (seq != null)
             {
                 ScrollToBottom();
@@ -1128,8 +1148,33 @@ namespace PSTerm.Render
             char ch = e.KeyChar;
             TermModifiers mods = CurrentModifiers();
 
-            // Control characters already came through OnKeyDown as Ctrl+letter.
-            if ((mods & TermModifiers.Control) != 0 && ch < 0x20) { e.Handled = true; return; }
+            bool ctrl = (mods & TermModifiers.Control) != 0;
+            bool alt = (mods & TermModifiers.Alt) != 0;
+
+            // Ctrl+letter and the Ctrl+digit codes were sent from OnKeyDown, which
+            // suppresses this event. What can still arrive with Ctrl held is Ctrl plus
+            // punctuation - Ctrl+[, Ctrl+], Ctrl+\ - which the keyboard layout has
+            // already translated into the matching control character.
+            if (ctrl && !alt && ch < 0x20)
+            {
+                bool cursorKeys, keypad;
+                lock (_sync)
+                {
+                    cursorKeys = _term.ApplicationCursorKeys;
+                    keypad = _term.ApplicationKeypad;
+                }
+                string control = _keys.Encode(TermKey.Char, ch, TermModifiers.None, cursorKeys, keypad);
+                if (control != null)
+                {
+                    ScrollToBottom();
+                    RaiseInput(control);
+                }
+                e.Handled = true;
+                return;
+            }
+
+            // Enter, Tab, Escape and Backspace are keys, not characters, and were sent
+            // from OnKeyDown.
             if (ch == '\r' || ch == '\n' || ch == '\t' || ch == '\x1b' || ch == '\b') { e.Handled = true; return; }
 
             bool appCursor, appKeypad;
@@ -1139,8 +1184,11 @@ namespace PSTerm.Render
                 appKeypad = _term.ApplicationKeypad;
             }
 
-            // Alt is delivered by OnKeyDown for the meta prefix; here it would double up.
-            TermModifiers passMods = mods & ~TermModifiers.Alt & ~TermModifiers.Control;
+            // Ctrl and Alt together is how Windows reports AltGr, which produces an
+            // ordinary character on many layouts (@ { [ ] \ on a German keyboard), so
+            // it must go through unmodified. Alt on its own keeps its meta meaning.
+            TermModifiers passMods = mods & ~TermModifiers.Control;
+            if (ctrl) passMods &= ~TermModifiers.Alt;
             string seq = _keys.Encode(TermKey.Char, ch, passMods, appCursor, appKeypad);
             if (seq != null)
             {
@@ -1148,6 +1196,43 @@ namespace PSTerm.Render
                 RaiseInput(seq);
             }
             e.Handled = true;
+        }
+
+        /// <summary>
+        /// The character a key stands for when Ctrl or Alt is held, or NUL when the key
+        /// should be left to OnKeyPress. Only letters, digits and Space are translated;
+        /// punctuation depends on the keyboard layout and arrives in OnKeyPress already
+        /// translated by Windows.
+        /// </summary>
+        public static char ModifiedKeyChar(System.Windows.Forms.Keys keyCode, TermModifiers mods)
+        {
+            bool ctrl = (mods & TermModifiers.Control) != 0;
+            bool alt = (mods & TermModifiers.Alt) != 0;
+            bool shift = (mods & TermModifiers.Shift) != 0;
+
+            // Exactly one of the two: Ctrl+Alt is AltGr and produces characters.
+            if (ctrl == alt) return '\0';
+
+            if (keyCode >= System.Windows.Forms.Keys.A && keyCode <= System.Windows.Forms.Keys.Z)
+            {
+                char letter = (char)('a' + (keyCode - System.Windows.Forms.Keys.A));
+                // Ctrl+letter is the same code either way; Alt+Shift+letter is a capital.
+                return (shift && alt) ? char.ToUpperInvariant(letter) : letter;
+            }
+
+            // Ctrl+Space is NUL. Alt+Space belongs to the window's system menu.
+            if (keyCode == System.Windows.Forms.Keys.Space) return ctrl ? ' ' : '\0';
+
+            if (keyCode >= System.Windows.Forms.Keys.D0 && keyCode <= System.Windows.Forms.Keys.D9 && !shift)
+            {
+                char digit = (char)('0' + (keyCode - System.Windows.Forms.Keys.D0));
+                // Ctrl+2..8 are the classic NUL, ESC, FS, GS, RS and US codes; the other
+                // digits have no control code, so Ctrl leaves them alone.
+                if (ctrl && (digit < '2' || digit > '8')) return '\0';
+                return digit;
+            }
+
+            return '\0';
         }
 
         private static TermKey MapKey(System.Windows.Forms.Keys k)
@@ -1453,8 +1538,32 @@ namespace PSTerm.Render
             // off the Windows clipboard, and a stray LF would double-space input.
             text = text.Replace("\r\n", "\r").Replace("\n", "\r");
 
+            // Anything else that is a control character has no business in pasted
+            // text. The one that matters is ESC: a clipboard carrying ESC[201~ would
+            // end a bracketed paste early and let the rest run as typed commands.
+            text = StripPasteControls(text);
+            if (text.Length == 0) return;
+
             bool bracketed;
             lock (_sync) { bracketed = _term.BracketedPaste; }
+
+            // A pasted line break is an Enter keypress. Bracketed paste lets the remote
+            // application hold the text back; without it every line runs immediately,
+            // so give the operator the chance to say no.
+            if (!bracketed)
+            {
+                int lines = 1;
+                foreach (char c in text) { if (c == '\r') lines++; }
+                if (text[text.Length - 1] == '\r') lines--;
+
+                EventHandler<TerminalPasteEventArgs> confirm = PasteRequested;
+                if (lines > 1 && confirm != null)
+                {
+                    TerminalPasteEventArgs args = new TerminalPasteEventArgs(text, lines);
+                    confirm(this, args);
+                    if (args.Cancel) return;
+                }
+            }
 
             ScrollToBottom();
 
@@ -1468,6 +1577,26 @@ namespace PSTerm.Render
             {
                 RaiseInput(text);
             }
+        }
+
+        /// <summary>Remove control characters other than Tab and CR from pasted text.</summary>
+        public static string StripPasteControls(string text)
+        {
+            StringBuilder sb = null;
+            for (int i = 0; i < text.Length; i++)
+            {
+                char c = text[i];
+                bool drop = (c < 0x20 && c != '\t' && c != '\r') || c == 0x7f || (c >= 0x80 && c < 0xa0);
+                if (drop)
+                {
+                    if (sb == null) sb = new StringBuilder(text, 0, i, text.Length);
+                }
+                else if (sb != null)
+                {
+                    sb.Append(c);
+                }
+            }
+            return sb == null ? text : sb.ToString();
         }
 
         // =====================================================================

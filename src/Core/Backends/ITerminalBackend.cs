@@ -40,7 +40,18 @@ namespace PSTerm.Backends
     public class BackendStatusEventArgs : EventArgs
     {
         public readonly string Message;
-        public BackendStatusEventArgs(string message) { Message = message; }
+        /// <summary>True when this message reports that the link is now up, so the UI
+        /// can show the session as connected. Transports that connect in the
+        /// background rely on it: Connect() has returned long before the link exists.</summary>
+        public readonly bool Connected;
+
+        public BackendStatusEventArgs(string message) : this(message, false) { }
+
+        public BackendStatusEventArgs(string message, bool connected)
+        {
+            Message = message;
+            Connected = connected;
+        }
     }
 
     public interface ITerminalBackend : IDisposable
@@ -61,7 +72,9 @@ namespace PSTerm.Backends
         /// <summary>Short human-readable identity, e.g. "COM3 @ 115200" or "ssh core-sw1".</summary>
         string Description { get; }
 
-        /// <summary>Open the connection. Throws on failure.</summary>
+        /// <summary>Open the connection. A transport that has to wait on the network
+        /// returns immediately and reports success through Status (Connected = true)
+        /// and failure through Closed; the rest throw on failure.</summary>
         void Connect();
 
         void Write(byte[] data, int offset, int count);

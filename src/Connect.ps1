@@ -137,7 +137,10 @@ function New-PSTermLogger {
     #>
     param(
         [Parameter(Mandatory)]$Profile,
-        [Parameter(Mandatory)][string]$Root
+        [Parameter(Mandatory)][string]$Root,
+        # Receives the reason when logging was requested but could not be started, so
+        # the caller can say so. A warning stream is no use: there is no console.
+        [ref]$Failure
     )
 
     if (-not $Profile.logging.enabled) { return $null }
@@ -170,6 +173,8 @@ function New-PSTermLogger {
     $tokens['user'] = [string]$Profile.ssh.user
     $tokens['port'] = switch ($Profile.type) {
         'Telnet' { [string]$Profile.telnet.port }
+        'Serial' { [string]$Profile.serial.portName }
+        'Shell'  { 'local' }
         default  { [string]$Profile.ssh.port }
     }
 
@@ -178,7 +183,7 @@ function New-PSTermLogger {
     }
     catch {
         # Logging must never prevent a connection.
-        Write-Warning "Session logging could not be started: $($_.Exception.Message)"
+        if ($Failure) { $Failure.Value = $_.Exception.Message }
         $null
     }
 }

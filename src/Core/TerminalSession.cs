@@ -78,9 +78,14 @@ namespace PSTerm
         private string _title;
         private readonly ManualResetEvent _closedEvent = new ManualResetEvent(false);
         private int _disposed;
+        private int _lastDataTick = Environment.TickCount;
+        private int _dataChunks;
 
         /// <summary>Raised on the UI thread when the session ends.</summary>
         public event EventHandler<SessionClosedEventArgs> SessionClosed;
+        /// <summary>Raised on the UI thread when the link comes up. A transport that
+        /// connects in the background raises it some time after Connect() returns.</summary>
+        public event EventHandler<SessionMessageEventArgs> Connected;
         /// <summary>Raised on the UI thread for progress messages.</summary>
         public event EventHandler<SessionMessageEventArgs> StatusChanged;
         /// <summary>Raised on the UI thread when the host sets the window title.</summary>
@@ -116,6 +121,11 @@ namespace PSTerm
         public int? ExitCode { get { return _exitCode; } }
         /// <summary>Why the session ended, or null for a clean close.</summary>
         public string CloseReason { get { return _closeReason; } }
+        /// <summary>How many chunks of host output have arrived. Lets a script tell
+        /// whether anything has been heard since it last sent something.</summary>
+        public int DataChunks { get { return Thread.VolatileRead(ref _dataChunks); } }
+        /// <summary>Milliseconds since the host last sent anything.</summary>
+        public int IdleMilliseconds { get { return unchecked(Environment.TickCount - _lastDataTick); } }
         /// <summary>The most recent title the host asked for.</summary>
         public string Title { get { return _title; } }
 
@@ -146,6 +156,9 @@ namespace PSTerm
 
         private void OnBackendData(object sender, DataReceivedEventArgs e)
         {
+            _lastDataTick = Environment.TickCount;
+            Interlocked.Increment(ref _dataChunks);
+
             SessionLogger logger = _logger;
             if (logger != null) logger.WriteFromHost(e.Buffer, e.Offset, e.Count);
 
@@ -188,10 +201,17 @@ namespace PSTerm
 
         private void OnBackendStatus(object sender, BackendStatusEventArgs e)
         {
+            bool connected = e.Connected;
             RaiseOnUi(new Action(delegate
             {
                 EventHandler<SessionMessageEventArgs> h = StatusChanged;
                 if (h != null) h(this, new SessionMessageEventArgs(e.Message));
+
+                if (connected)
+                {
+                    EventHandler<SessionMessageEventArgs> up = Connected;
+                    if (up != null) up(this, new SessionMessageEventArgs(e.Message));
+                }
             }));
         }
 

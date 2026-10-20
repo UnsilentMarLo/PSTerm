@@ -104,6 +104,9 @@ namespace PSTerm.Backends
             _exitWatcher.IsBackground = true;
             _exitWatcher.Name = "PSTerm ConPTY exit watcher";
             _exitWatcher.Start();
+
+            EventHandler<BackendStatusEventArgs> up = Status;
+            if (up != null) up(this, new BackendStatusEventArgs("Started " + _description, true));
         }
 
         private void WatchForExit()
@@ -304,12 +307,42 @@ namespace PSTerm.Backends
             return null;
         }
 
-        /// <summary>Quote an argument for a Windows command line.</summary>
+        /// <summary>
+        /// Quote an argument for a Windows command line, following the rules
+        /// CommandLineToArgvW reads them by: backslashes only matter when they run up
+        /// to a quote mark, where they are doubled.
+        /// </summary>
         public static string Quote(string value)
         {
             if (string.IsNullOrEmpty(value)) return "\"\"";
             if (value.IndexOfAny(new char[] { ' ', '\t', '"' }) < 0) return value;
-            return "\"" + value.Replace("\"", "\\\"") + "\"";
+
+            StringBuilder sb = new StringBuilder(value.Length + 2);
+            sb.Append('"');
+            int backslashes = 0;
+            foreach (char c in value)
+            {
+                if (c == '\\')
+                {
+                    backslashes++;
+                }
+                else if (c == '"')
+                {
+                    sb.Append('\\', backslashes * 2 + 1);
+                    sb.Append('"');
+                    backslashes = 0;
+                }
+                else
+                {
+                    sb.Append('\\', backslashes);
+                    sb.Append(c);
+                    backslashes = 0;
+                }
+            }
+            // Trailing backslashes would otherwise escape the closing quote.
+            sb.Append('\\', backslashes * 2);
+            sb.Append('"');
+            return sb.ToString();
         }
 
         /// <summary>
@@ -319,6 +352,15 @@ namespace PSTerm.Backends
         public static string BuildSshCommandLine(SshLaunchOptions options)
         {
             if (options == null) throw new ArgumentNullException("options");
+
+            if (string.IsNullOrEmpty(options.Host))
+                throw new ArgumentException("An SSH connection needs a host.");
+
+            // A destination that starts with '-' would be read by ssh as an option -
+            // "-oProxyCommand=..." runs a program - and profiles are plain files that
+            // get shared, imported and edited by hand.
+            if (options.Host.StartsWith("-") || (options.User != null && options.User.StartsWith("-")))
+                throw new ArgumentException("The SSH host and user name cannot start with '-'.");
 
             string ssh = FindSsh();
             if (ssh == null)
@@ -371,7 +413,8 @@ namespace PSTerm.Backends
                     sb.Append(" -o ").Append(Quote(extra));
             }
 
-            sb.Append(' ');
+            // "--" ends option parsing, so nothing after it can be taken for a flag.
+            sb.Append(" -- ");
             if (!string.IsNullOrEmpty(options.User))
                 sb.Append(Quote(options.User + "@" + options.Host));
             else
