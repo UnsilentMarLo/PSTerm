@@ -178,6 +178,21 @@ namespace PSTerm.Render
 
         public int IndexOf(TabStripItem item) { return _items.IndexOf(item); }
 
+        /// <summary>Move a tab to a new position. The selection stays on the same tab.</summary>
+        public void MoveItem(int from, int to)
+        {
+            if (from < 0 || from >= _items.Count || to < 0 || to >= _items.Count || from == to) return;
+
+            TabStripItem selected = SelectedItem;
+            TabStripItem item = _items[from];
+            _items.RemoveAt(from);
+            _items.Insert(to, item);
+
+            _selectedIndex = selected != null ? _items.IndexOf(selected) : -1;
+            if (_selectedIndex >= 0) EnsureVisible(_selectedIndex);
+            Invalidate();
+        }
+
         // =====================================================================
         // Layout
         // =====================================================================

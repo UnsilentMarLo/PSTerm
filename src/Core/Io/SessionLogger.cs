@@ -71,11 +71,20 @@ namespace PSTerm.Io
         private volatile bool _stopping;
         private StreamWriter _stream;
         private string _path;
+        private string _basePath;
         private long _written;
         private int _rotation;
         private bool _atLineStart = true;
         private bool _expectingPassword;
+        private string _promptTail = string.Empty;
         private int _closed;
+
+        // Escape-sequence state is kept per stream. Host output and typed input are
+        // separate byte streams that interleave in the queue, so a sequence that is
+        // half-received on one must not be completed by bytes from the other.
+        private int _hostStripState;
+        private int _userStripState;
+        private int _promptStripState;
 
         private struct Entry
         {
@@ -104,6 +113,7 @@ namespace PSTerm.Io
 
             _path = ExpandTemplate(_options.PathTemplate, tokens);
             OpenFile();
+            _basePath = _path;
 
             _writer = new Thread(WriteLoop);
             _writer.IsBackground = true;
@@ -169,12 +179,46 @@ namespace PSTerm.Io
                 Directory.CreateDirectory(dir);
 
             FileMode mode = _options.Append ? FileMode.Append : FileMode.Create;
-            FileStream fs = new FileStream(_path, mode, FileAccess.Write, FileShare.Read, 8192);
+            string wanted = _path;
+            FileStream fs = null;
+
+            // Two tabs to the same device on the same day expand to the same file name.
+            // The second cannot share it - and must not truncate it - so it takes the
+            // next free numbered name instead of silently not logging at all.
+            for (int attempt = 1; fs == null; attempt++)
+            {
+                try
+                {
+                    fs = new FileStream(_path, mode, FileAccess.Write, FileShare.Read, 8192);
+                }
+                catch (IOException ex)
+                {
+                    if (!IsSharingViolation(ex) || attempt >= 50) throw;
+                    _path = Numbered(wanted, attempt + 1);
+                }
+            }
+
             _written = fs.Length;
 
             // UTF-8 without a BOM: a log is often tailed or grepped by other tools.
             _stream = new StreamWriter(fs, new UTF8Encoding(false));
             _stream.AutoFlush = false;
+        }
+
+        private static bool IsSharingViolation(IOException ex)
+        {
+            // ERROR_SHARING_VIOLATION (32) and ERROR_LOCK_VIOLATION (33).
+            int code = System.Runtime.InteropServices.Marshal.GetHRForException(ex) & 0xFFFF;
+            return code == 32 || code == 33;
+        }
+
+        private static string Numbered(string path, int number)
+        {
+            string dir = System.IO.Path.GetDirectoryName(path);
+            string name = System.IO.Path.GetFileNameWithoutExtension(path);
+            string ext = System.IO.Path.GetExtension(path);
+            return System.IO.Path.Combine(dir ?? string.Empty,
+                name + "-" + number.ToString(CultureInfo.InvariantCulture) + ext);
         }
 
         private void Rotate()
@@ -184,12 +228,20 @@ namespace PSTerm.Io
             _stream.Dispose();
             _stream = null;
 
-            _rotation++;
-            string dir = System.IO.Path.GetDirectoryName(_path);
-            string name = System.IO.Path.GetFileNameWithoutExtension(_path);
-            string ext = System.IO.Path.GetExtension(_path);
-            string rotated = System.IO.Path.Combine(dir ?? string.Empty,
-                name + "." + _rotation.ToString(CultureInfo.InvariantCulture) + ext);
+            // Always derived from the original name, so the files read x.1.log,
+            // x.2.log, x.3.log rather than x.1.2.3.log - and never one that already
+            // exists, which a previous run may have left behind.
+            string dir = System.IO.Path.GetDirectoryName(_basePath);
+            string name = System.IO.Path.GetFileNameWithoutExtension(_basePath);
+            string ext = System.IO.Path.GetExtension(_basePath);
+            string rotated;
+            do
+            {
+                _rotation++;
+                rotated = System.IO.Path.Combine(dir ?? string.Empty,
+                    name + "." + _rotation.ToString(CultureInfo.InvariantCulture) + ext);
+            }
+            while (File.Exists(rotated));
 
             _path = rotated;
             _written = 0;
@@ -233,7 +285,8 @@ namespace PSTerm.Io
 
         private void WriteLoop()
         {
-            var decoder = new UTF8Encoding(false, false).GetDecoder();
+            System.Text.Decoder hostDecoder = new UTF8Encoding(false, false).GetDecoder();
+            System.Text.Decoder userDecoder = new UTF8Encoding(false, false).GetDecoder();
             char[] chars = new char[8192];
 
             while (true)
@@ -249,7 +302,7 @@ namespace PSTerm.Io
                         entry = _queue.Dequeue();
                     }
 
-                    try { WriteEntry(entry, decoder, ref chars); }
+                    try { WriteEntry(entry, hostDecoder, userDecoder, ref chars); }
                     catch (IOException) { /* disk full or the file vanished; keep the session alive */ }
                     catch (ObjectDisposedException) { return; }
                 }
@@ -268,32 +321,62 @@ namespace PSTerm.Io
             }
         }
 
-        private void WriteEntry(Entry entry, System.Text.Decoder decoder, ref char[] chars)
+        private void WriteEntry(Entry entry, System.Text.Decoder hostDecoder,
+                                System.Text.Decoder userDecoder, ref char[] chars)
         {
             if (_stream == null) return;
 
+            System.Text.Decoder decoder = entry.FromUser ? userDecoder : hostDecoder;
+
             if (_options.Format == LogFormat.Raw)
             {
+                byte[] data = entry.Data;
+
+                if (_options.MaskPasswords)
+                {
+                    if (entry.FromUser)
+                    {
+                        // The file stays byte-exact except for the secret itself.
+                        if (_expectingPassword) data = MaskBytes(entry.Data, entry.Count);
+                    }
+                    else
+                    {
+                        // Raw mode still has to know when a password prompt went by.
+                        int needed = entry.Count * 2 + 8;
+                        if (chars.Length < needed) chars = new char[needed];
+                        int n = decoder.GetChars(entry.Data, 0, entry.Count, chars, 0);
+                        if (n > 0)
+                            TrackPasswordPrompt(StripEscapes(new string(chars, 0, n), ref _promptStripState));
+                    }
+                }
+
                 // Raw mode writes the bytes untouched, so the file can be replayed
                 // through a terminal later and render exactly as it did live.
                 _stream.Flush();
-                _stream.BaseStream.Write(entry.Data, 0, entry.Count);
+                _stream.BaseStream.Write(data, 0, entry.Count);
                 _written += entry.Count;
                 RotateIfNeeded();
                 return;
             }
 
-            int needed = entry.Count * 2 + 8;
-            if (chars.Length < needed) chars = new char[needed];
+            int capacity = entry.Count * 2 + 8;
+            if (chars.Length < capacity) chars = new char[capacity];
             int charCount = decoder.GetChars(entry.Data, 0, entry.Count, chars, 0);
             if (charCount <= 0) return;
 
             string text = new string(chars, 0, charCount);
 
-            if (!entry.FromUser) TrackPasswordPrompt(text);
-            else if (_options.MaskPasswords && _expectingPassword) text = MaskInput(text);
+            if (entry.FromUser)
+            {
+                text = StripEscapes(text, ref _userStripState);
+                if (_options.MaskPasswords && _expectingPassword) text = MaskInput(text);
+            }
+            else
+            {
+                text = StripEscapes(text, ref _hostStripState);
+                TrackPasswordPrompt(text);
+            }
 
-            text = StripEscapes(text);
             if (text.Length == 0) return;
 
             if (_options.Format == LogFormat.Timestamped) WriteTimestamped(text);
@@ -346,15 +429,22 @@ namespace PSTerm.Io
         {
             if (!_options.MaskPasswords) return;
 
-            string lower = hostText.ToLowerInvariant();
-            foreach (string prompt in PasswordPrompts)
+            // Only the line the cursor is on can be a prompt, and it may arrive in
+            // pieces ("Passw" then "ord:"), so the unfinished line is carried over.
+            string combined = (_promptTail + hostText).ToLowerInvariant();
+            int newline = combined.LastIndexOfAny(new char[] { '\n', '\r' });
+            string line = newline >= 0 ? combined.Substring(newline + 1) : combined;
+
+            bool prompt = false;
+            foreach (string candidate in PasswordPrompts)
             {
-                if (lower.Contains(prompt)) { _expectingPassword = true; return; }
+                if (line.Contains(candidate)) { prompt = true; break; }
             }
 
-            // A newline from the host after the prompt means the secret is finished.
-            if (_expectingPassword && (lower.Contains("\n") || lower.Contains("\r")))
-                _expectingPassword = false;
+            if (prompt) _expectingPassword = true;
+            else if (newline >= 0) _expectingPassword = false;   // output moved past the prompt
+
+            _promptTail = line.Length > 64 ? line.Substring(line.Length - 64) : line;
         }
 
         private string MaskInput(string typed)
@@ -369,14 +459,25 @@ namespace PSTerm.Io
             return sb.ToString();
         }
 
+        private byte[] MaskBytes(byte[] typed, int count)
+        {
+            byte[] masked = new byte[count];
+            for (int i = 0; i < count; i++)
+            {
+                byte b = typed[i];
+                if (b == (byte)'\r' || b == (byte)'\n') { masked[i] = b; _expectingPassword = false; }
+                else if (b < 0x20) masked[i] = b;
+                else masked[i] = (byte)'*';
+            }
+            return masked;
+        }
+
         /// <summary>
         /// Remove escape sequences for the text log formats. Unlike v1's regex this
         /// runs a small state machine, so a sequence split across two chunks does
         /// not leak its tail into the file.
         /// </summary>
-        private int _stripState;
-
-        private string StripEscapes(string text)
+        private static string StripEscapes(string text, ref int state)
         {
             StringBuilder sb = new StringBuilder(text.Length);
 
@@ -384,10 +485,10 @@ namespace PSTerm.Io
             {
                 char c = text[i];
 
-                switch (_stripState)
+                switch (state)
                 {
                     case 0: // ground
-                        if (c == '\x1b') { _stripState = 1; }
+                        if (c == '\x1b') { state = 1; }
                         else if (c == '\x07') { /* bell: drop */ }
                         else if (c == '\b')
                         {
@@ -399,29 +500,29 @@ namespace PSTerm.Io
                         break;
 
                     case 1: // after ESC
-                        if (c == '[') _stripState = 2;
-                        else if (c == ']') _stripState = 3;
-                        else if (c == 'P' || c == 'X' || c == '^' || c == '_') _stripState = 3;
-                        else if (c == '(' || c == ')' || c == '*' || c == '+' || c == '#' || c == '%') _stripState = 4;
-                        else _stripState = 0;
+                        if (c == '[') state = 2;
+                        else if (c == ']') state = 3;
+                        else if (c == 'P' || c == 'X' || c == '^' || c == '_') state = 3;
+                        else if (c == '(' || c == ')' || c == '*' || c == '+' || c == '#' || c == '%') state = 4;
+                        else state = 0;
                         break;
 
                     case 2: // CSI: consume until a final byte
-                        if (c >= 0x40 && c <= 0x7E) _stripState = 0;
+                        if (c >= 0x40 && c <= 0x7E) state = 0;
                         break;
 
                     case 3: // string sequence: consume until BEL or ST
-                        if (c == '\x07') _stripState = 0;
-                        else if (c == '\x1b') _stripState = 5;
-                        else if (c == '\x9c') _stripState = 0;
+                        if (c == '\x07') state = 0;
+                        else if (c == '\x1b') state = 5;
+                        else if (c == '\x9c') state = 0;
                         break;
 
                     case 4: // single intermediate then one more byte
-                        _stripState = 0;
+                        state = 0;
                         break;
 
                     case 5: // ESC seen inside a string sequence
-                        _stripState = (c == '\\') ? 0 : 3;
+                        state = (c == '\\') ? 0 : 3;
                         break;
                 }
             }
@@ -450,8 +551,13 @@ namespace PSTerm.Io
                 _stream = null;
             }
 
-            try { _signal.Close(); }
-            catch (ObjectDisposedException) { }
+            // A writer still alive after the grace period is stuck on a slow disk. It
+            // waits on this event, so closing it underneath would crash the process.
+            if (_writer == null || !_writer.IsAlive)
+            {
+                try { _signal.Close(); }
+                catch (ObjectDisposedException) { }
+            }
         }
 
         public void Dispose() { Close(); }

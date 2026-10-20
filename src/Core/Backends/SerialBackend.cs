@@ -123,7 +123,7 @@ namespace PSTerm.Backends
 
             _port = port;
             _portOpen = true;
-            RaiseStatus("Connected to " + _settings.Describe());
+            RaiseConnected("Connected to " + _settings.Describe());
         }
 
         private void ReadLoop()
@@ -134,7 +134,9 @@ namespace PSTerm.Backends
             {
                 try
                 {
-                    int read = _port.Read(buffer, 0, buffer.Length);
+                    SerialPort port = _port;
+                    if (port == null) throw new IOException("The serial port is closed.");
+                    int read = port.Read(buffer, 0, buffer.Length);
                     if (read > 0)
                     {
                         EventHandler<DataReceivedEventArgs> handler = DataReceived;
@@ -190,7 +192,7 @@ namespace PSTerm.Backends
                 try
                 {
                     OpenPort();
-                    RaiseStatus("Reconnected to " + _settings.PortName);
+                    RaiseConnected("Reconnected to " + _settings.PortName);
                     return true;
                 }
                 catch (Exception)
@@ -203,10 +205,13 @@ namespace PSTerm.Backends
 
         public void Write(byte[] data, int offset, int count)
         {
-            if (!_portOpen || _closing || count <= 0) return;
+            // Take the port once: the reader thread nulls _port when the adapter
+            // vanishes, and that can happen between the check and the write.
+            SerialPort port = _port;
+            if (!_portOpen || _closing || count <= 0 || port == null) return;
             try
             {
-                _port.Write(data, offset, count);
+                port.Write(data, offset, count);
             }
             catch (TimeoutException)
             {
@@ -215,6 +220,11 @@ namespace PSTerm.Backends
                 RaiseStatus("Write timed out; the device is not accepting data (check flow control).");
             }
             catch (InvalidOperationException) { }
+            catch (UnauthorizedAccessException)
+            {
+                // Windows reports a yanked USB adapter this way. The reader thread
+                // notices the same fault and handles the recovery.
+            }
             catch (IOException ex)
             {
                 RaiseStatus("Write failed: " + ex.Message);
@@ -227,28 +237,32 @@ namespace PSTerm.Backends
         /// </summary>
         public void SendBreak(int milliseconds)
         {
-            if (!_portOpen) return;
+            SerialPort port = _port;
+            if (!_portOpen || port == null) return;
             try
             {
-                _port.BreakState = true;
+                port.BreakState = true;
                 Thread.Sleep(milliseconds > 0 ? milliseconds : 250);
-                _port.BreakState = false;
+                port.BreakState = false;
             }
             catch (InvalidOperationException) { }
+            catch (UnauthorizedAccessException) { }
             catch (IOException) { }
         }
 
         public void SetSignal(bool dtr, bool rts)
         {
-            if (!_portOpen) return;
+            SerialPort port = _port;
+            if (!_portOpen || port == null) return;
             try
             {
-                _port.DtrEnable = dtr;
-                _port.RtsEnable = rts;
+                port.DtrEnable = dtr;
+                port.RtsEnable = rts;
                 _settings.DtrEnable = dtr;
                 _settings.RtsEnable = rts;
             }
             catch (InvalidOperationException) { }
+            catch (UnauthorizedAccessException) { }
             catch (IOException) { }
         }
 
@@ -256,15 +270,17 @@ namespace PSTerm.Backends
         public bool TryGetSignals(out bool cts, out bool dsr, out bool cd)
         {
             cts = dsr = cd = false;
-            if (!_portOpen) return false;
+            SerialPort port = _port;
+            if (!_portOpen || port == null) return false;
             try
             {
-                cts = _port.CtsHolding;
-                dsr = _port.DsrHolding;
-                cd = _port.CDHolding;
+                cts = port.CtsHolding;
+                dsr = port.DsrHolding;
+                cd = port.CDHolding;
                 return true;
             }
             catch (InvalidOperationException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
             catch (IOException) { return false; }
         }
 
@@ -300,6 +316,12 @@ namespace PSTerm.Backends
         {
             EventHandler<BackendStatusEventArgs> h = Status;
             if (h != null) h(this, new BackendStatusEventArgs(message));
+        }
+
+        private void RaiseConnected(string message)
+        {
+            EventHandler<BackendStatusEventArgs> h = Status;
+            if (h != null) h(this, new BackendStatusEventArgs(message, true));
         }
 
         private void RaiseClosed(string reason, int? exitCode)

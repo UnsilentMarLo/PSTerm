@@ -241,6 +241,32 @@ Test-Case 'paths containing spaces are quoted' {
     Assert-True ($cmd -match '"C:\\my keys\\id_rsa"') "identity file not quoted in: $cmd"
 }
 
+Test-Case 'the destination follows -- so it can never be read as an option' {
+    $o = New-Object PSTerm.Backends.SshLaunchOptions
+    $o.Host = 'h'; $o.User = 'u'
+    $cmd = [PSTerm.Backends.ConPtyCommands]::BuildSshCommandLine($o)
+    Assert-True ($cmd -match ' -- u@h') "expected '-- u@h' in: $cmd"
+}
+
+Test-Case 'a host or user starting with a dash is refused' {
+    foreach ($bad in @(@('-oProxyCommand=calc', ''), @('h', '-oProxyCommand=calc'))) {
+        $o = New-Object PSTerm.Backends.SshLaunchOptions
+        $o.Host = $bad[0]; $o.User = $bad[1]
+        $message = ''
+        try { [void][PSTerm.Backends.ConPtyCommands]::BuildSshCommandLine($o) }
+        catch { $message = $_.Exception.Message }
+        Assert-True ($message -match "cannot start with") "'$($bad -join '/')' was not refused (got '$message')"
+    }
+}
+
+Test-Case 'quoting follows the Windows command-line rules' {
+    $q = [PSTerm.Backends.ConPtyCommands]
+    Assert-Equal 'plain'              ($q::Quote('plain'))
+    Assert-Equal '"say \"hi\""'       ($q::Quote('say "hi"'))
+    Assert-Equal '"C:\my dir\\"'      ($q::Quote('C:\my dir\'))
+    Assert-Equal '""'                 ($q::Quote(''))
+}
+
 # ------------------------------------------------------------- logging ------
 
 Write-Host "`nSession logging" -ForegroundColor Yellow
@@ -372,6 +398,100 @@ Test-Case 'an escape sequence split across two writes does not leak' {
     $content = Get-Content -Raw -LiteralPath $path
     Assert-True ($content -match 'VISIBLE') "text lost. Got: '$content'"
     Assert-True ($content -notmatch '1m') "the tail of the split sequence leaked into the log: '$content'"
+}
+
+Test-Case 'raw logs mask a typed password too' {
+    $path = Join-Path $logDir 'raw-masked.log'
+    $opts = New-Object PSTerm.Io.SessionLoggerOptions
+    $opts.PathTemplate = $path
+    $opts.Format = [PSTerm.Io.LogFormat]::Raw
+    $opts.IncludeInput = $true
+    $opts.MaskPasswords = $true
+    $logger = New-Object PSTerm.Io.SessionLogger($opts, (New-Tokens @{}))
+
+    $prompt = [System.Text.Encoding]::UTF8.GetBytes('Password: ')
+    $logger.WriteFromHost($prompt, 0, $prompt.Length)
+    Start-Sleep -Milliseconds 300
+    $secret = [System.Text.Encoding]::UTF8.GetBytes("hunter2`r")
+    $logger.WriteFromUser($secret, 0, $secret.Length)
+    $logger.Close()
+
+    $content = Get-Content -Raw -LiteralPath $path
+    Assert-True ($content -notmatch 'hunter2') "the password was written to the raw log: '$content'"
+    Assert-True ($content -match 'Password: ') 'the prompt itself should still be there'
+}
+
+Test-Case 'a password prompt split across reads is still recognised' {
+    $path = Join-Path $logDir 'split-prompt.log'
+    $opts = New-Object PSTerm.Io.SessionLoggerOptions
+    $opts.PathTemplate = $path
+    $opts.IncludeInput = $true
+    $logger = New-Object PSTerm.Io.SessionLogger($opts, (New-Tokens @{}))
+
+    foreach ($piece in @('Passw', 'ord: ')) {
+        $b = [System.Text.Encoding]::UTF8.GetBytes($piece)
+        $logger.WriteFromHost($b, 0, $b.Length)
+        Start-Sleep -Milliseconds 300
+    }
+    $secret = [System.Text.Encoding]::UTF8.GetBytes("hunter2`r")
+    $logger.WriteFromUser($secret, 0, $secret.Length)
+    $logger.Close()
+
+    $content = Get-Content -Raw -LiteralPath $path
+    Assert-True ($content -notmatch 'hunter2') "the password was written to the log: '$content'"
+}
+
+Test-Case 'ordinary typing after a finished prompt is not masked' {
+    $path = Join-Path $logDir 'unmasked.log'
+    $opts = New-Object PSTerm.Io.SessionLoggerOptions
+    $opts.PathTemplate = $path
+    $opts.IncludeInput = $true
+    $logger = New-Object PSTerm.Io.SessionLogger($opts, (New-Tokens @{}))
+
+    $b = [System.Text.Encoding]::UTF8.GetBytes("Password: `r`nWelcome`r`nsw1# ")
+    $logger.WriteFromHost($b, 0, $b.Length)
+    Start-Sleep -Milliseconds 300
+    $cmd = [System.Text.Encoding]::UTF8.GetBytes("show version`r")
+    $logger.WriteFromUser($cmd, 0, $cmd.Length)
+    $logger.Close()
+
+    $content = Get-Content -Raw -LiteralPath $path
+    Assert-True ($content -match 'show version') "a command typed after login was masked: '$content'"
+}
+
+Test-Case 'a second logger on the same file takes a numbered name instead of failing' {
+    $path = Join-Path $logDir 'shared.log'
+    $opts = New-Object PSTerm.Io.SessionLoggerOptions
+    $opts.PathTemplate = $path
+    $first = New-Object PSTerm.Io.SessionLogger($opts, (New-Tokens @{}))
+    $second = New-Object PSTerm.Io.SessionLogger($opts, (New-Tokens @{}))
+    try {
+        Assert-Equal $path $first.Path
+        Assert-True ($second.Path -ne $first.Path) 'the second logger must not share the first one''s file'
+        Assert-True ($second.Path -match 'shared-2\.log$') "unexpected name: $($second.Path)"
+        Assert-True $second.IsOpen 'the second logger should be writing'
+    }
+    finally {
+        $first.Close(); $second.Close()
+    }
+}
+
+Test-Case 'rotated files are numbered from the original name' {
+    $path = Join-Path $logDir 'rot.log'
+    $opts = New-Object PSTerm.Io.SessionLoggerOptions
+    $opts.PathTemplate = $path
+    $opts.MaxBytes = 50
+    $logger = New-Object PSTerm.Io.SessionLogger($opts, (New-Tokens @{}))
+    $chunk = [System.Text.Encoding]::UTF8.GetBytes(('x' * 60) + "`r`n")
+    1..3 | ForEach-Object { $logger.WriteFromHost($chunk, 0, $chunk.Length) }
+    Start-Sleep -Milliseconds 500
+    $logger.Close()
+
+    $names = @(Get-ChildItem -LiteralPath $logDir -Filter 'rot*.log' | ForEach-Object Name)
+    Assert-True ($names -contains 'rot.1.log') "expected rot.1.log among: $($names -join ', ')"
+    Assert-True ($names -contains 'rot.2.log') "expected rot.2.log among: $($names -join ', ')"
+    $compound = @($names | Where-Object { $_ -match '^rot\.\d+\.\d+\.log$' })
+    Assert-Equal 0 $compound.Count "rotation names must not compound: $($compound -join ', ')"
 }
 
 }

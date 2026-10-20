@@ -77,6 +77,11 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 [System.Windows.Forms.Application]::SetCompatibleTextRenderingDefault($false)
 
+# Route exceptions from event handlers to our own handler (installed below) instead
+# of WinForms' Quit/Continue crash dialog. Has to be set before the first control.
+[System.Windows.Forms.Application]::SetUnhandledExceptionMode(
+    [System.Windows.Forms.UnhandledExceptionMode]::CatchException)
+
 # The core is loaded next because DPI awareness also has to be declared before
 # the first window and the call lives in the core. Loading an assembly creates
 # no windows, so this ordering is safe.
@@ -141,6 +146,35 @@ if ($NoWindow) {
 # -----------------------------------------------------------------------------
 
 $form = New-PSTermMainWindow -Root $Root
+
+# An error in one handler should cost that action, not the window and every open
+# session with it. Record it where it can be found - there is no console to read it
+# from - and tell the user, but not on every repeat: a fault in a paint handler can
+# fire many times a second.
+$errorState = [pscustomobject]@{ LastDialog = [datetime]::MinValue }
+[System.Windows.Forms.Application]::add_ThreadException({
+    param($sender, $e)
+
+    $logPath = Join-Path $Root 'Logs\psterm-errors.log'
+    try {
+        $dir = Split-Path -Parent $logPath
+        if (-not (Test-Path -LiteralPath $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+        Add-Content -LiteralPath $logPath -Encoding UTF8 -Value (
+            "[{0}] {1}`r`n" -f (Get-Date -Format 'yyyy-MM-dd HH:mm:ss'), $e.Exception.ToString())
+    }
+    catch { }
+
+    if (([datetime]::Now - $errorState.LastDialog).TotalSeconds -gt 10) {
+        $errorState.LastDialog = [datetime]::Now
+        try {
+            [void][System.Windows.Forms.MessageBox]::Show(
+                "Something went wrong:`r`n`r`n$($e.Exception.Message)`r`n`r`nDetails were written to:`r`n$logPath",
+                'PSTerm', [System.Windows.Forms.MessageBoxButtons]::OK,
+                [System.Windows.Forms.MessageBoxIcon]::Warning)
+        }
+        catch { }
+    }
+}.GetNewClosure())
 
 if ($Connect) {
     # Opened from Shown, not before: the terminal control must exist and be laid

@@ -14,6 +14,11 @@
 
     Nothing here ever returns a secret as a plain string unless explicitly asked
     for at the point of use, and profiles store only a key into this file.
+
+    Status: the store works and is tested, but nothing in the connection path uses
+    it yet - there is no UI to save a password and no step that sends one. It is
+    here so that feature can be added without a design change, not as a place to
+    put passwords today.
 #>
 
 Set-StrictMode -Version Latest

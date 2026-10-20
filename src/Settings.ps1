@@ -19,6 +19,8 @@ function New-PSTermDefaultSettings {
         scrollback       = 10000
         copyOnSelect     = $true
         confirmOnClose   = $true
+        # Pasting several lines into a shell runs every one of them at once.
+        confirmMultilinePaste = $true
         defaultLogFolder = 'Logs'
         # Where a brand-new profile starts, so house style only has to be set once.
         defaultBackspace = 'Delete'
