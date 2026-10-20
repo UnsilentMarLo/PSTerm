@@ -1,0 +1,20 @@
+# Compiled core (regenerated on first run from src/Core/*.cs)
+bin/
+
+# Build output
+dist/
+PSTerm-Compiled/
+
+# Session logs
+Logs/
+*.log
+
+# Local secrets and migration backups - never commit these
+Profiles/credentials.dat
+Profiles/*.v1-backup
+Profiles/*.corrupt-*
+Profiles/settings.json
+
+# Code signing artefacts
+*.cer
+*.pfx
