@@ -935,6 +935,58 @@ Test-Case 'ordinary text is returned untouched' {
     Assert-Equal $text ($TC::StripPasteControls($text))
 }
 
+# ------------------------------------------------- saved-password answer ---
+
+Write-Host "`nPassword responder" -ForegroundColor Yellow
+
+function Send-ToResponder {
+    param($Responder, [string]$Text)
+    $chars = $Text.ToCharArray()
+    $Responder.Observe($chars, 0, $chars.Length)
+}
+
+Test-Case 'a password prompt is answered with the password and a carriage return' {
+    $r = New-Object PSTerm.PasswordResponder('s3cret')
+    Assert-Equal "s3cret`r" (Send-ToResponder $r "admin@sw1's password: ")
+}
+
+Test-Case 'banner text is not mistaken for a prompt' {
+    $r = New-Object PSTerm.PasswordResponder('s3cret')
+    Assert-True ($null -eq (Send-ToResponder $r "Last login: Mon`r`nWelcome`r`n")) 'banner answered'
+    Assert-True ($null -eq (Send-ToResponder $r "Password: expired, see your administrator`r`n")) 'statement answered'
+    Assert-True $r.IsArmed 'should still be waiting for a real prompt'
+}
+
+Test-Case 'a prompt split across reads is still answered' {
+    $r = New-Object PSTerm.PasswordResponder('s3cret')
+    Assert-True ($null -eq (Send-ToResponder $r 'Passw')) 'answered too early'
+    Assert-Equal "s3cret`r" (Send-ToResponder $r 'ord: ')
+}
+
+Test-Case 'colour codes around the prompt do not hide it' {
+    $r = New-Object PSTerm.PasswordResponder('s3cret')
+    Assert-Equal "s3cret`r" (Send-ToResponder $r "${ESC}[1mPassword:${ESC}[0m ")
+}
+
+Test-Case 'the password is sent once, never retried' {
+    $r = New-Object PSTerm.PasswordResponder('s3cret')
+    [void](Send-ToResponder $r 'Password: ')
+    Assert-True (-not $r.IsArmed) 'should be disarmed after use'
+    Assert-True ($null -eq (Send-ToResponder $r "Permission denied`r`nPassword: ")) 'a retry must not be answered'
+}
+
+Test-Case 'an empty password arms nothing' {
+    $r = New-Object PSTerm.PasswordResponder('')
+    Assert-True (-not $r.IsArmed) 'empty password should not arm'
+    Assert-True ($null -eq (Send-ToResponder $r 'Password: ')) 'nothing to send'
+}
+
+Test-Case 'the logger and the responder agree on what a prompt is' {
+    Assert-True ([PSTerm.PasswordPrompt]::LooksLikePrompt('[sudo] password for bob')) 'loose match'
+    Assert-True (-not [PSTerm.PasswordPrompt]::IsAwaitingAnswer('[sudo] password for bob')) 'no colon: not awaiting'
+    Assert-True ([PSTerm.PasswordPrompt]::IsAwaitingAnswer('Password:  ')) 'trailing spaces are fine'
+}
+
 # ---------------------------------------------------------------- summary ---
 
 

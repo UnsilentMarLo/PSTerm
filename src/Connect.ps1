@@ -145,44 +145,45 @@ function New-PSTermLogger {
 
     if (-not $Profile.logging.enabled) { return $null }
 
-    $options = New-Object PSTerm.Io.SessionLoggerOptions
-
-    # A relative template is resolved against the install folder, keeping logs
-    # with the portable install rather than scattering them.
-    $template = [string]$Profile.logging.pathTemplate
-    if (-not [System.IO.Path]::IsPathRooted(($template -replace '\{[^}]*\}', 'x'))) {
-        $template = Join-Path $Root $template
-    }
-
-    $options.PathTemplate  = $template
-    $options.Format        = ConvertTo-PSTermEnum ([PSTerm.Io.LogFormat]) $Profile.logging.format ([PSTerm.Io.LogFormat]::PlainText)
-    $options.IncludeInput  = [bool]$Profile.logging.includeInput
-    $options.MaskPasswords = [bool]$Profile.logging.maskPasswords
-    $options.MaxBytes      = [long]$Profile.logging.maxBytes
-    $options.Append        = [bool]$Profile.logging.append
-
-    $tokens = New-Object 'System.Collections.Generic.Dictionary[string,string]'
-    $tokens['name']    = [string]$Profile.name
-    $tokens['session'] = [string]$Profile.name
-    $tokens['host']    = switch ($Profile.type) {
-        'Telnet' { [string]$Profile.telnet.host }
-        'Serial' { [string]$Profile.serial.portName }
-        'Shell'  { 'local' }
-        default  { [string]$Profile.ssh.host }
-    }
-    $tokens['user'] = [string]$Profile.ssh.user
-    $tokens['port'] = switch ($Profile.type) {
-        'Telnet' { [string]$Profile.telnet.port }
-        'Serial' { [string]$Profile.serial.portName }
-        'Shell'  { 'local' }
-        default  { [string]$Profile.ssh.port }
-    }
-
+    # Everything below, the path handling included, is inside the try: a mistyped
+    # template (an illegal character, say) must cost the log, not the connection.
     try {
+        $options = New-Object PSTerm.Io.SessionLoggerOptions
+
+        # A relative template is resolved against the install folder, keeping logs
+        # with the portable install rather than scattering them.
+        $template = [string]$Profile.logging.pathTemplate
+        if (-not [System.IO.Path]::IsPathRooted(($template -replace '\{[^}]*\}', 'x'))) {
+            $template = Join-Path $Root $template
+        }
+
+        $options.PathTemplate  = $template
+        $options.Format        = ConvertTo-PSTermEnum ([PSTerm.Io.LogFormat]) $Profile.logging.format ([PSTerm.Io.LogFormat]::PlainText)
+        $options.IncludeInput  = [bool]$Profile.logging.includeInput
+        $options.MaskPasswords = [bool]$Profile.logging.maskPasswords
+        $options.MaxBytes      = [long]$Profile.logging.maxBytes
+        $options.Append        = [bool]$Profile.logging.append
+
+        $tokens = New-Object 'System.Collections.Generic.Dictionary[string,string]'
+        $tokens['name']    = [string]$Profile.name
+        $tokens['session'] = [string]$Profile.name
+        $tokens['host']    = switch ($Profile.type) {
+            'Telnet' { [string]$Profile.telnet.host }
+            'Serial' { [string]$Profile.serial.portName }
+            'Shell'  { 'local' }
+            default  { [string]$Profile.ssh.host }
+        }
+        $tokens['user'] = [string]$Profile.ssh.user
+        $tokens['port'] = switch ($Profile.type) {
+            'Telnet' { [string]$Profile.telnet.port }
+            'Serial' { [string]$Profile.serial.portName }
+            'Shell'  { 'local' }
+            default  { [string]$Profile.ssh.port }
+        }
+
         New-Object PSTerm.Io.SessionLogger($options, $tokens)
     }
     catch {
-        # Logging must never prevent a connection.
         if ($Failure) { $Failure.Value = $_.Exception.Message }
         $null
     }

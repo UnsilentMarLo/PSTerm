@@ -73,3 +73,30 @@ function Save-PSTermSettings {
     ($Settings | ConvertTo-Json -Depth 5) | Set-Content -LiteralPath $temp -Encoding UTF8
     Move-Item -LiteralPath $temp -Destination $path -Force
 }
+
+function Set-PSTermProfileDefaults {
+    <#
+    .SYNOPSIS
+        Start a profile from the user's own defaults rather than the built-in ones.
+    .DESCRIPTION
+        Used for anything that is not a saved profile - the profile editor's "new
+        connection" and whatever the quick-connect bar parses - so the house style set
+        in Settings applies however a session is opened.
+    #>
+    param(
+        [Parameter(Mandatory)]$Profile,
+        [Parameter(Mandatory)]$Settings
+    )
+
+    $Profile.terminal.backspace  = [string]$Settings.defaultBackspace
+    $Profile.terminal.encoding   = [string]$Settings.defaultEncoding
+    $Profile.terminal.theme      = [string]$Settings.theme
+    $Profile.terminal.fontFamily = [string]$Settings.fontFamily
+    $Profile.terminal.fontSize   = $Settings.fontSize
+    $Profile.terminal.scrollback = $Settings.scrollback
+
+    $folder = ([string]$Settings.defaultLogFolder).Trim().TrimEnd('\', '/')
+    if ($folder) { $Profile.logging.pathTemplate = "$folder\{name}-{date}.log" }
+
+    $Profile
+}

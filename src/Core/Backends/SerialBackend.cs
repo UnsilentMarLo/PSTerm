@@ -250,20 +250,23 @@ namespace PSTerm.Backends
             catch (IOException) { }
         }
 
-        public void SetSignal(bool dtr, bool rts)
+        /// <summary>Set DTR and RTS. Returns false when the port refused (RTS cannot be
+        /// driven by hand while hardware flow control owns it) or is not open.</summary>
+        public bool SetSignal(bool dtr, bool rts)
         {
             SerialPort port = _port;
-            if (!_portOpen || port == null) return;
+            if (!_portOpen || port == null) return false;
             try
             {
                 port.DtrEnable = dtr;
                 port.RtsEnable = rts;
                 _settings.DtrEnable = dtr;
                 _settings.RtsEnable = rts;
+                return true;
             }
-            catch (InvalidOperationException) { }
-            catch (UnauthorizedAccessException) { }
-            catch (IOException) { }
+            catch (InvalidOperationException) { return false; }
+            catch (UnauthorizedAccessException) { return false; }
+            catch (IOException) { return false; }
         }
 
         /// <summary>Current modem status lines, for a status bar.</summary>

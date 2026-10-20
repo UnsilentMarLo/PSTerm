@@ -78,6 +78,7 @@ namespace PSTerm
         private string _title;
         private readonly ManualResetEvent _closedEvent = new ManualResetEvent(false);
         private int _disposed;
+        private PasswordResponder _responder;
         private int _lastDataTick = Environment.TickCount;
         private int _dataChunks;
 
@@ -165,6 +166,34 @@ namespace PSTerm
             int charCount;
             char[] chars = _decoder.Decode(e.Buffer, e.Offset, e.Count, out charCount);
             if (charCount > 0) _sink.Feed(chars, 0, charCount);
+
+            PasswordResponder responder = _responder;
+            if (responder != null && charCount > 0)
+            {
+                string reply = responder.Observe(chars, 0, charCount);
+                if (reply != null)
+                {
+                    _responder = null;
+                    SendSecret(reply);
+                    OnBackendStatus(this, new BackendStatusEventArgs("Sent the saved password."));
+                }
+            }
+        }
+
+        /// <summary>
+        /// Answer the first password prompt with this password. Cleared after one use or
+        /// after the first moments of the session, whichever comes first.
+        /// </summary>
+        public void SetPassword(string password)
+        {
+            _responder = string.IsNullOrEmpty(password) ? null : new PasswordResponder(password);
+        }
+
+        private void SendSecret(string text)
+        {
+            byte[] bytes = _decoder.Encode(text);
+            try { SendBytes(bytes, 0, bytes.Length); }
+            finally { Array.Clear(bytes, 0, bytes.Length); }
         }
 
         // =====================================================================

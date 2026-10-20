@@ -120,13 +120,7 @@ function Invoke-PSTermEditProfile {
     $isNew = -not $Profile
     if ($isNew) {
         $Profile = New-PSTermProfile
-        $settings = Import-PSTermSettings -Root $State.Root
-        $Profile.terminal.backspace = $settings.defaultBackspace
-        $Profile.terminal.encoding = $settings.defaultEncoding
-        $Profile.terminal.theme = $settings.theme
-        $Profile.terminal.fontFamily = $settings.fontFamily
-        $Profile.terminal.fontSize = $settings.fontSize
-        $Profile.terminal.scrollback = $settings.scrollback
+        [void](Set-PSTermProfileDefaults -Profile $Profile -Settings (Import-PSTermSettings -Root $State.Root))
     }
 
     $theme = $State.Theme
@@ -184,6 +178,23 @@ function Invoke-PSTermEditProfile {
     $shellGrid = New-PSTermFieldGrid
     $shellCmd = Add-PSTermField $shellGrid 'Command line' (New-PSTermTextField $Profile.shell.commandLine) $theme
     $shellDir = Add-PSTermField $shellGrid 'Start in' (New-PSTermTextField $Profile.shell.workingDirectory) $theme
+
+    # ---- saved password --------------------------------------------------
+    $authGrid = New-PSTermFieldGrid
+    $passwordBox = New-PSTermTextField ''
+    $passwordBox.UseSystemPasswordChar = $true
+    [void](Add-PSTermField $authGrid 'Password' $passwordBox $theme)
+    $hasSavedPassword = [bool]$Profile.credentialKey
+    $clearPassword = Add-PSTermField $authGrid '' (New-PSTermCheckField 'Forget the saved password' $false) $theme
+    $clearPassword.Enabled = $hasSavedPassword
+
+    $authHint = New-PSTermLabel -Text $(if ($hasSavedPassword) {
+            'A password is saved for this connection. Leave the field empty to keep it, or type a new one to replace it.'
+        } else {
+            'Optional. Sent once, the first time the device asks for a password or key passphrase, then forgotten. Stored encrypted for this Windows account only.'
+        }) -Theme $theme
+    $authHint.ForeColor = $theme.TextMuted
+    $authHint.MaximumSize = New-Object System.Drawing.Size([int](480 * $scale), 0)
 
     # ---- terminal ------------------------------------------------------
     $termGrid = New-PSTermFieldGrid
@@ -262,7 +273,7 @@ function Invoke-PSTermEditProfile {
     }
 
     $dialogPages = @(
-        @{ Title = 'Connection'; Page = (New-PSTermDialogPage @($general, $sshGrid, $telnetGrid, $serialGrid, $shellGrid)) }
+        @{ Title = 'Connection'; Page = (New-PSTermDialogPage @($general, $sshGrid, $telnetGrid, $serialGrid, $shellGrid, $authGrid, $authHint)) }
         @{ Title = 'Terminal';   Page = (New-PSTermDialogPage @($termGrid, $backspaceHint)) }
         @{ Title = 'Logging';    Page = (New-PSTermDialogPage @($logGrid, $logHint)) }
         @{ Title = 'Automation'; Page = (New-PSTermDialogPage @($autoGrid, $autoHint)) }
@@ -325,6 +336,8 @@ function Invoke-PSTermEditProfile {
         $telnetGrid.Visible = ($selected -eq 'Telnet')
         $serialGrid.Visible = ($selected -eq 'Serial')
         $shellGrid.Visible  = ($selected -eq 'Shell')
+        $authGrid.Visible   = ($selected -ne 'Shell')
+        $authHint.Visible   = ($selected -ne 'Shell')
     }.GetNewClosure()
     $typeBox.Add_SelectedIndexChanged($updateVisibility)
     & $updateVisibility
@@ -395,7 +408,26 @@ function Invoke-PSTermEditProfile {
 
     $Profile.autoInput = @($autoBox.Text -split "`r?`n" | Where-Object { $_.Trim() })
 
+    # The password goes to the encrypted store, never into the profile file.
+    $newPassword = $passwordBox.Text
+    $forgetPassword = $clearPassword.Checked
+
     $dialog.Dispose()
+
+    if ($forgetPassword -and $Profile.credentialKey) {
+        Remove-PSTermSecret -Root $State.Root -Key ([string]$Profile.credentialKey)
+        $Profile.credentialKey = ''
+    }
+    elseif ($newPassword) {
+        if (Test-PSTermDpapiAvailable) {
+            if (-not $Profile.credentialKey) { $Profile.credentialKey = "profile-$($Profile.id)" }
+            [void](Set-PSTermSecret -Root $State.Root -Key ([string]$Profile.credentialKey) -Value $newPassword)
+        }
+        else {
+            [void](Show-PSTermMessage -Theme $State.Theme -Owner $State.Form -Title 'Password not saved' -Level Warning `
+                -Message 'This PowerShell cannot encrypt a password for storage, so it was not saved. Everything else was.')
+        }
+    }
 
     Set-PSTermProfile -Store $State.Store -Profile $Profile | Out-Null
     Save-PSTermProfiles -Root $State.Root -Store $State.Store
@@ -463,6 +495,11 @@ function Show-PSTermCommandPalette {
     Add-Command 'Select all'             ''                            { $t = Get-PSTermActiveTab -State $State; if ($t) { $t.Control.SelectAll() } }.GetNewClosure()
     Add-Command 'Reset terminal'         'Clear the screen and modes'  { $t = Get-PSTermActiveTab -State $State; if ($t) { $t.Control.ResetTerminal() } }.GetNewClosure()
     Add-Command 'Send break'             'Serial only'                 { Invoke-PSTermSendBreak -State $State }.GetNewClosure()
+    Add-Command 'Toggle DTR'             'Serial only'                 { Invoke-PSTermToggleSignal -State $State -Line DTR }.GetNewClosure()
+    Add-Command 'Toggle RTS'             'Serial only'                 { Invoke-PSTermToggleSignal -State $State -Line RTS }.GetNewClosure()
+    Add-Command 'Toggle logging for this tab' 'Start or stop a log'    { Invoke-PSTermToggleLogging -State $State }.GetNewClosure()
+    Add-Command 'Show this tab''s log file' 'In Explorer'              { Invoke-PSTermOpenLog -State $State }.GetNewClosure()
+    Add-Command 'Settings...'            'Defaults and behaviour'      { Show-PSTermSettings -State $State }.GetNewClosure()
     Add-Command 'Import PuTTY sessions'  'From the registry'           { Invoke-PSTermImportPutty -State $State }.GetNewClosure()
     Add-Command 'Import ssh_config hosts' 'From ~/.ssh/config'         { Invoke-PSTermImportSshConfig -State $State }.GetNewClosure()
     Add-Command 'Toggle theme'           'Dark and light'              { Invoke-PSTermToggleTheme -State $State }.GetNewClosure()
@@ -762,7 +799,15 @@ function Show-PSTermMenu {
     [void](Add-MenuItem 'Import PuTTY sessions' { Invoke-PSTermImportPutty -State $State }.GetNewClosure())
     [void](Add-MenuItem 'Import ssh_config hosts' { Invoke-PSTermImportSshConfig -State $State }.GetNewClosure())
     [void]$menu.Items.Add('-')
+    [void](Add-MenuItem 'Settings...' { Show-PSTermSettings -State $State }.GetNewClosure())
     [void](Add-MenuItem 'Toggle theme' { Invoke-PSTermToggleTheme -State $State }.GetNewClosure())
+    [void]$menu.Items.Add('-')
+    [void](Add-MenuItem 'Toggle logging for this tab' { Invoke-PSTermToggleLogging -State $State }.GetNewClosure())
+    [void](Add-MenuItem 'Show this tab''s log file' { Invoke-PSTermOpenLog -State $State }.GetNewClosure())
+    [void](Add-MenuItem 'Send serial break' { Invoke-PSTermSendBreak -State $State }.GetNewClosure())
+    [void](Add-MenuItem 'Toggle DTR' { Invoke-PSTermToggleSignal -State $State -Line DTR }.GetNewClosure())
+    [void](Add-MenuItem 'Toggle RTS' { Invoke-PSTermToggleSignal -State $State -Line RTS }.GetNewClosure())
+    [void]$menu.Items.Add('-')
     [void](Add-MenuItem 'Open the PSTerm folder' { Start-Process explorer.exe $State.Root }.GetNewClosure())
     [void]$menu.Items.Add('-')
     [void](Add-MenuItem 'About PSTerm' { Show-PSTermAbout -State $State }.GetNewClosure())
@@ -822,6 +867,203 @@ function Invoke-PSTermToggleTheme {
     # chrome follow the application theme, so a session's colours never change
     # underneath the operator mid-task.
     Set-PSTermStatusMessage -State $State -Message "Theme: $($settings.theme). Open tabs keep their own colours."
+}
+
+function Show-PSTermSettings {
+    <#
+    .SYNOPSIS
+        The application settings dialog.
+    .DESCRIPTION
+        These are the defaults for new connections plus a few behaviours of the window
+        itself. Existing saved connections keep their own values.
+    #>
+    param([Parameter(Mandatory)]$State)
+
+    $settings = Import-PSTermSettings -Root $State.Root
+    $previousTheme = [string]$settings.theme
+    $theme = $State.Theme
+    $scale = Get-PSTermScale -Control $State.Form
+
+    $dialog = New-Object PSTerm.Render.ThemedForm
+    $dialog.Text = 'Settings'
+    $dialog.StartPosition = 'CenterParent'
+    $dialog.FormBorderStyle = 'Sizable'
+    $dialog.MinimizeBox = $false
+    $dialog.MaximizeBox = $false
+    $dialog.Font = New-PSTermFont
+    $dialog.Size = New-Object System.Drawing.Size([int](540 * $scale), [int](600 * $scale))
+    $dialog.MinimumSize = New-Object System.Drawing.Size([int](440 * $scale), [int](420 * $scale))
+    $rowHeight = [int]($dialog.Font.Height * 1.85)
+
+    $grid = New-PSTermFieldGrid
+    $themeBox    = Add-PSTermField $grid 'Theme' (New-PSTermComboField -Items @('Dark', 'Light') -Value ([string]$settings.theme)) $theme
+    $fontBox     = Add-PSTermField $grid 'Font' (New-PSTermComboField -Items (Get-PSTermAvailableMonospaceFonts) -Value ([string]$settings.fontFamily) -Editable) $theme
+    $sizeBox     = Add-PSTermField $grid 'Font size' (New-PSTermTextField $settings.fontSize) $theme
+    $scrollBox   = Add-PSTermField $grid 'Scrollback lines' (New-PSTermTextField $settings.scrollback) $theme
+    $encodingBox = Add-PSTermField $grid 'Encoding' (New-PSTermComboField -Items @('Utf8', 'Latin1', 'Ascii', 'Oem') -Value ([string]$settings.defaultEncoding)) $theme
+    $backspaceBox= Add-PSTermField $grid 'Backspace sends' (New-PSTermComboField -Items @('Delete', 'Backspace') -Value ([string]$settings.defaultBackspace)) $theme
+    $logBox      = Add-PSTermField $grid 'Log folder' (New-PSTermTextField $settings.defaultLogFolder) $theme
+    $copyBox     = Add-PSTermField $grid '' (New-PSTermCheckField 'Copy to the clipboard when text is selected' ([bool]$settings.copyOnSelect)) $theme
+    $closeBox    = Add-PSTermField $grid '' (New-PSTermCheckField 'Ask before closing a connected session or the window' ([bool]$settings.confirmOnClose)) $theme
+    $pasteBox    = Add-PSTermField $grid '' (New-PSTermCheckField 'Ask before pasting several lines' ([bool]$settings.confirmMultilinePaste)) $theme
+
+    $note = New-PSTermLabel -Text 'Font, encoding, backspace, scrollback and log folder are the starting values for new connections. Saved connections keep their own. Copy on select applies to tabs opened from now on.' -Theme $theme
+    $note.ForeColor = $theme.TextMuted
+    $note.MaximumSize = New-Object System.Drawing.Size([int](440 * $scale), 0)
+
+    $page = New-Object PSTerm.Render.ThemedPanel
+    $page.Dock = 'Fill'
+    $page.AutoScroll = $true
+    $note.Dock = 'Top'
+    $page.Controls.Add($note)
+    $page.Controls.Add($grid)
+
+    $buttonRow = New-Object PSTerm.Render.ThemedPanel
+    $buttonRow.Dock = 'Bottom'
+    $buttonRow.Height = $rowHeight + [int](16 * $scale)
+    $buttonFlow = New-Object System.Windows.Forms.FlowLayoutPanel
+    $buttonFlow.Dock = 'Fill'
+    $buttonFlow.FlowDirection = 'RightToLeft'
+    $buttonFlow.Padding = New-Object System.Windows.Forms.Padding([int](10 * $scale), [int](8 * $scale), [int](10 * $scale), [int](8 * $scale))
+    $buttonRow.Controls.Add($buttonFlow)
+
+    $cancelButton = New-Object System.Windows.Forms.Button
+    $cancelButton.Text = 'Cancel'
+    $cancelButton.DialogResult = 'Cancel'
+    $cancelButton.Width = [int](96 * $scale); $cancelButton.Height = $rowHeight
+    $okButton = New-Object System.Windows.Forms.Button
+    $okButton.Text = 'Save'
+    $okButton.DialogResult = 'OK'
+    $okButton.Width = [int](96 * $scale); $okButton.Height = $rowHeight
+    $buttonFlow.Controls.AddRange(@($okButton, $cancelButton))
+    $dialog.AcceptButton = $okButton
+    $dialog.CancelButton = $cancelButton
+
+    $dialog.Controls.Add($page)
+    $dialog.Controls.Add($buttonRow)
+
+    Set-PSTermFormTheme -Control $dialog -Theme $theme
+    $dialog.Add_Shown({ Set-PSTermTitleBarTheme -Form $dialog -Dark ($theme.Mode -eq 'Dark') }.GetNewClosure())
+
+    if ($dialog.ShowDialog($State.Form) -ne [System.Windows.Forms.DialogResult]::OK) {
+        $dialog.Dispose()
+        return
+    }
+
+    $settings.theme = [string]$themeBox.SelectedItem
+    $settings.fontFamily = $fontBox.Text.Trim()
+    [double]$size = 0
+    $settings.fontSize = if ([double]::TryParse(($sizeBox.Text -replace ',', '.'), [System.Globalization.NumberStyles]::Float, [System.Globalization.CultureInfo]::InvariantCulture, [ref]$size) -and $size -gt 4) { $size } else { 10.5 }
+    $settings.scrollback = ConvertTo-PSTermInt $scrollBox.Text 10000
+    $settings.defaultEncoding = [string]$encodingBox.SelectedItem
+    $settings.defaultBackspace = [string]$backspaceBox.SelectedItem
+    $settings.defaultLogFolder = $logBox.Text.Trim()
+    $settings.copyOnSelect = $copyBox.Checked
+    $settings.confirmOnClose = $closeBox.Checked
+    $settings.confirmMultilinePaste = $pasteBox.Checked
+    $dialog.Dispose()
+
+    Save-PSTermSettings -Root $State.Root -Settings $settings
+
+    if ($settings.theme -ne $previousTheme) {
+        $State.Theme = New-PSTermChromeTheme -Mode $settings.theme
+        Apply-PSTermTheme -State $State
+    }
+    Set-PSTermStatusMessage -State $State -Message 'Settings saved.'
+}
+
+function Invoke-PSTermToggleLogging {
+    <#
+    .SYNOPSIS
+        Start or stop logging for the active tab, whatever its profile says.
+    #>
+    param([Parameter(Mandatory)]$State)
+
+    $tab = Get-PSTermActiveTab -State $State
+    if (-not $tab -or -not $tab.Session) { return }
+
+    if ($tab.Logger) {
+        $path = $tab.Logger.Path
+        $tab.Session.Logger = $null
+        try { $tab.Logger.Close() } catch { }
+        $tab.Logger = $null
+        $tab.LastLogPath = $path
+        Update-PSTermStatus -State $State
+        Set-PSTermStatusMessage -State $State -Message "Logging stopped. The log is in $path"
+        return
+    }
+
+    if ($tab.Closed) {
+        Set-PSTermStatusMessage -State $State -Message 'This session has ended; there is nothing to log.' -Level Warning
+        return
+    }
+
+    # A copy, so turning logging on for one tab does not edit the saved profile.
+    $copy = $tab.Profile | ConvertTo-Json -Depth 8 | ConvertFrom-Json
+    $copy.logging.enabled = $true
+
+    $failure = ''
+    $logger = New-PSTermLogger -Profile $copy -Root $State.Root -Failure ([ref]$failure)
+    if (-not $logger) {
+        Set-PSTermStatusMessage -State $State -Message "Logging could not be started: $failure" -Level Warning
+        return
+    }
+
+    $tab.Session.Logger = $logger
+    $tab.Logger = $logger
+    $tab.LastLogPath = $logger.Path
+    Update-PSTermStatus -State $State
+    Set-PSTermStatusMessage -State $State -Message "Logging to $($logger.Path)"
+}
+
+function Invoke-PSTermOpenLog {
+    <#
+    .SYNOPSIS
+        Show the active tab's log file in Explorer.
+    #>
+    param([Parameter(Mandatory)]$State)
+
+    $tab = Get-PSTermActiveTab -State $State
+    if (-not $tab) { return }
+
+    $path = if ($tab.Logger) { [string]$tab.Logger.Path } else { [string]$tab.LastLogPath }
+    if ($path -and (Test-Path -LiteralPath $path)) {
+        Start-Process explorer.exe "/select,`"$path`""
+    }
+    else {
+        Set-PSTermStatusMessage -State $State -Message 'This tab has no log file yet. Use "Toggle logging for this tab" to start one.' -Level Warning
+    }
+}
+
+function Invoke-PSTermToggleSignal {
+    <#
+    .SYNOPSIS
+        Flip DTR or RTS on the active serial tab. Some equipment resets or wakes on it.
+    #>
+    param(
+        [Parameter(Mandatory)]$State,
+        [Parameter(Mandatory)][ValidateSet('DTR', 'RTS')][string]$Line
+    )
+
+    $tab = Get-PSTermActiveTab -State $State
+    $backend = if ($tab -and $tab.Session) { $tab.Session.Backend } else { $null }
+    if ($backend -isnot [PSTerm.Backends.SerialBackend]) {
+        Set-PSTermStatusMessage -State $State -Message "$Line applies to serial sessions only." -Level Warning
+        return
+    }
+
+    $dtr = [bool]$backend.Settings.DtrEnable
+    $rts = [bool]$backend.Settings.RtsEnable
+    if ($Line -eq 'DTR') { $dtr = -not $dtr } else { $rts = -not $rts }
+
+    if ($backend.SetSignal($dtr, $rts)) {
+        $now = if ($Line -eq 'DTR') { $dtr } else { $rts }
+        Set-PSTermStatusMessage -State $State -Message "$Line $(if ($now) { 'asserted' } else { 'released' })."
+        Update-PSTermStatus -State $State
+    }
+    else {
+        Set-PSTermStatusMessage -State $State -Message "$Line could not be changed. With RTS/CTS flow control the port drives RTS itself." -Level Warning
+    }
 }
 
 function Invoke-PSTermSendBreak {

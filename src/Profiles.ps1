@@ -13,9 +13,8 @@
       * Settings are nested per transport instead of every profile carrying every
         field for every transport.
       * Passwords are never stored here. A profile holds only a key into the
-        DPAPI-protected store (see Secrets.ps1). Nothing fills a password in at
-        connect time yet - ssh and the device prompt for it in the terminal - so
-        the key is groundwork, not a feature you can rely on today.
+        DPAPI-protected store (see Secrets.ps1); the compiled core sends it to the
+        first password prompt.
       * Fields that do nothing are gone. v1 wrote RTSEnable and TelnetNegotiation
         into every profile and never read either one; both are now real settings.
 
@@ -108,12 +107,10 @@ function New-PSTermProfile {
         }
 
         # Lines sent after connecting, as plain text in profiles.json. Never put a
-        # password here. For SSH use a key; the credential store below is not yet
-        # wired into the login.
+        # password here: use the Password field, which goes to the credential store.
         autoInput = @()
 
-        # Key into the DPAPI store, not the secret itself. Reserved: nothing reads it
-        # when connecting yet.
+        # Key into the DPAPI store, not the secret itself.
         credentialKey = ''
     }
 }

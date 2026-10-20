@@ -93,16 +93,6 @@ namespace PSTerm.Io
             public bool FromUser;
         }
 
-        /// <summary>Prompts that mean the next typed characters are a secret.
-        /// Matched case-insensitively against host output.</summary>
-        private static readonly string[] PasswordPrompts = new string[]
-        {
-            "password:", "password for", "passphrase for", "passphrase:",
-            "enter password", "'s password", "enable password",
-            "tacacs password", "old password", "new password",
-            "current password", "secret:"
-        };
-
         public string Path { get { return _path; } }
         public bool IsOpen { get { return _stream != null; } }
 
@@ -435,11 +425,7 @@ namespace PSTerm.Io
             int newline = combined.LastIndexOfAny(new char[] { '\n', '\r' });
             string line = newline >= 0 ? combined.Substring(newline + 1) : combined;
 
-            bool prompt = false;
-            foreach (string candidate in PasswordPrompts)
-            {
-                if (line.Contains(candidate)) { prompt = true; break; }
-            }
+            bool prompt = PSTerm.PasswordPrompt.LooksLikePrompt(line);
 
             if (prompt) _expectingPassword = true;
             else if (newline >= 0) _expectingPassword = false;   // output moved past the prompt

@@ -15,10 +15,9 @@
     Nothing here ever returns a secret as a plain string unless explicitly asked
     for at the point of use, and profiles store only a key into this file.
 
-    Status: the store works and is tested, but nothing in the connection path uses
-    it yet - there is no UI to save a password and no step that sends one. It is
-    here so that feature can be added without a design change, not as a place to
-    put passwords today.
+    The profile editor saves a connection's password here, and New-PSTermSessionTab
+    hands it to the session, whose compiled PasswordResponder sends it to the first
+    password prompt. It never passes through a script block on the way out.
 #>
 
 Set-StrictMode -Version Latest

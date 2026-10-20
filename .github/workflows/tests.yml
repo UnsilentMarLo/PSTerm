@@ -1,0 +1,43 @@
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # The real suites: the emulator, profiles, and the pseudo-console and logging
+  # integration tests. Everything that is Windows-only runs here, on both
+  # PowerShell editions, because the core compiles against different reference
+  # assemblies on each and a change can build on one and not the other.
+  windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Test suites on Windows PowerShell 5.1 and PowerShell 7
+        shell: powershell
+        run: tests\Run-AllTests.ps1 -BothEditions
+
+  # Fast checks that need no Windows. They fail within a minute or two on the
+  # mistakes that would otherwise wait for the Windows job: a script that does not
+  # parse, or core code that the in-box C# 5 compiler would reject.
+  quick-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: PowerShell files parse
+        shell: pwsh
+        run: ./tests/Test-Syntax.ps1
+
+      - name: Core compiles as C# 5
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y mono-mcs libmono-system-windows-forms4.0-cil libmono-system-drawing4.0-cil libmono-system-core4.0-cil
+          mcs -target:library -langversion:5 -out:"$RUNNER_TEMP/PSTerm.Core.dll" \
+            -r:System.dll -r:System.Core.dll -r:System.Drawing.dll -r:System.Windows.Forms.dll \
+            $(find src/Core -name '*.cs')

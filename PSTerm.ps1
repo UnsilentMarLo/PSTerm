@@ -182,7 +182,10 @@ if ($Connect) {
     $form.Add_Shown({
         $state = $form.Tag
         $profile = Get-PSTermProfileByName -Store $state.Store -Name $Connect
-        if (-not $profile) { $profile = ConvertFrom-PSTermQuickConnect -Text $Connect }
+        if (-not $profile) {
+            $profile = ConvertFrom-PSTermQuickConnect -Text $Connect
+            if ($profile) { [void](Set-PSTermProfileDefaults -Profile $profile -Settings (Import-PSTermSettings -Root $Root)) }
+        }
         if ($profile) {
             New-PSTermSessionTab -State $state -Profile $profile | Out-Null
         }

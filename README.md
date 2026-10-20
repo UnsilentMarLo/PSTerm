@@ -54,15 +54,23 @@ put on a share or a USB stick.
 
 **Interface**
 
-- Tabs with a close button and a connection-state dot.
+- Tabs with a close button and a connection-state dot, draggable into any order.
 - Quick-connect bar: type `admin@switch1`, `host:2222`, `telnet ts1 2004`,
   `COM3:115200` or `cmd` and press Enter.
 - Command palette on `Ctrl+Shift+P`.
 - Session tree with **folders** and a search box.
 - Import from the PuTTY registry and from `~/.ssh/config`.
 - Dark and light themes; DPI-aware at any display scaling.
+- A saved password per connection, answered to the first password prompt and
+  stored encrypted (see below).
+- A settings dialog for the defaults new connections start from.
+- Serial: DTR/RTS toggles and a break signal from the menu, with the live DTR, RTS,
+  CTS, DSR and CD state in the status bar.
 
 **Logging**
+
+Logging can also be switched on or off for a single tab from the menu, whatever its
+profile says, and "Show this tab's log file" opens it in Explorer.
 
 Per-line timestamps, raw or plain text, size-based rotation (`name.1.log`,
 `name.2.log`...), and templated paths
@@ -126,8 +134,7 @@ text.
 ```
 Profiles\profiles.json      saved connections
 Profiles\settings.json      application settings
-Profiles\credentials.dat    DPAPI-encrypted store, current user and machine only
-                            (not yet used to log in - see below)
+Profiles\credentials.dat    DPAPI-encrypted saved passwords, current user and machine only
 Logs\psterm-errors.log     unexpected errors, if any
 Logs\                       session logs, unless a profile says otherwise
 bin\                        compiled core, regenerated whenever the source changes
@@ -138,9 +145,14 @@ deliberately are not: DPAPI ties them to the Windows account that created them, 
 copying the folder to another machine carries the connections but not the
 passwords.
 
-PSTerm does not store or send passwords today: `ssh` and the device ask in the
-terminal, and the credential store exists for a later release. Do not put a password
-in a profile's auto-input lines - that file is plain text. Use an SSH key.
+A password entered in a connection's **Password** field is encrypted into
+`credentials.dat` and never written to `profiles.json`. It is sent once, to the first
+password or key-passphrase prompt in the first 45 seconds of a session, and never
+retried: a wrong password is not re-sent to an account that locks, and a later
+`sudo` prompt does not get it. It works for SSH, Telnet and serial. An SSH key is
+still the better choice where the device supports one.
+
+Do not put a password in a connection's auto-input lines - that file is plain text.
 
 `Profiles\profiles.json` is not tracked by git, since it holds your real hostnames.
 PSTerm creates a starter file on first run.
@@ -202,6 +214,10 @@ powershell -NoProfile -File tests\Run-AllTests.ps1 -BothEditions
 Three suites: the emulator in isolation, the profile and connection layer, and
 integration tests that drive real processes and pseudo-consoles. The core is
 recompiled automatically whenever a `.cs` file changes.
+
+`tests\Test-Syntax.ps1` parses every script and runs anywhere PowerShell does. GitHub
+Actions runs the full suites on Windows on both editions, plus a quick Linux job that
+parses the scripts and compiles the core as C# 5 with Mono, on every pull request.
 
 Serial is the one area the tests cannot reach without hardware. Verifying it needs
 a real adapter or a `com0com` virtual pair.

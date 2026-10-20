@@ -448,6 +448,75 @@ Test-Case 'key encoder settings come from the profile' {
     Assert-Equal ([PSTerm.Vt.FunctionKeyMode]::Vt220) $encoder.Settings.FunctionKeys
 }
 
+# ---------------------------------------------------- settings and defaults -
+
+Write-Host "`nSettings and defaults" -ForegroundColor Yellow
+
+Test-Case 'a new profile starts from the settings, not the built-in defaults' {
+    $settings = New-PSTermDefaultSettings
+    $settings.defaultBackspace = 'Backspace'
+    $settings.defaultEncoding = 'Latin1'
+    $settings.fontSize = 12
+    $settings.scrollback = 5000
+    $settings.defaultLogFolder = 'D:\NetLogs\'
+    $p = Set-PSTermProfileDefaults -Profile (New-PSTermProfile) -Settings $settings
+    Assert-Equal 'Backspace' $p.terminal.backspace
+    Assert-Equal 'Latin1' $p.terminal.encoding
+    Assert-Equal 12 $p.terminal.fontSize
+    Assert-Equal 5000 $p.terminal.scrollback
+    Assert-Equal 'D:\NetLogs\{name}-{date}.log' $p.logging.pathTemplate
+}
+
+Test-Case 'a quick-connect profile can take the same defaults' {
+    $settings = New-PSTermDefaultSettings
+    $settings.defaultBackspace = 'Backspace'
+    $p = ConvertFrom-PSTermQuickConnect -Text 'admin@core-sw1'
+    [void](Set-PSTermProfileDefaults -Profile $p -Settings $settings)
+    Assert-Equal 'Backspace' $p.terminal.backspace
+    Assert-Equal 'core-sw1' $p.ssh.host
+}
+
+Test-Case 'settings keep new keys across a save and load' {
+    $settings = New-PSTermDefaultSettings
+    Assert-True ([bool]$settings.confirmMultilinePaste) 'multi-line paste confirmation should default on'
+    $settings.confirmMultilinePaste = $false
+    $settings.copyOnSelect = $false
+    Save-PSTermSettings -Root $sandbox -Settings $settings
+    $loaded = Import-PSTermSettings -Root $sandbox
+    Assert-Equal $false ([bool]$loaded.confirmMultilinePaste)
+    Assert-Equal $false ([bool]$loaded.copyOnSelect)
+    Assert-Equal 'Dark' $loaded.theme
+}
+
+Test-Case 'a saved password lives in the credential store, not in the profile file' {
+    $p = New-PSTermProfile -Name 'Secret test'
+    $p.credentialKey = "profile-$($p.id)"
+    [void](Set-PSTermSecret -Root $sandbox -Key $p.credentialKey -Value 'hunter2-not-in-profile')
+    $store = [pscustomobject]@{ version = 2; folders = @(); profiles = @($p) }
+    Save-PSTermProfiles -Root $sandbox -Store $store
+    $raw = Get-Content -Raw -LiteralPath (Get-PSTermProfilePath -Root $sandbox)
+    Assert-True ($raw -notmatch 'hunter2') 'the password must never be written to profiles.json'
+    Assert-Equal 'hunter2-not-in-profile' (Get-PSTermSecret -Root $sandbox -Key $p.credentialKey)
+}
+
+Test-Case 'a bad log path costs the log, not the connection' {
+    $p = New-PSTermProfile -Name 'Bad log'
+    $p.logging.enabled = $true
+    $p.logging.pathTemplate = 'C:\psterm|illegal\<x>.log'
+    $reason = ''
+    $logger = New-PSTermLogger -Profile $p -Root $sandbox -Failure ([ref]$reason)
+    Assert-True ($null -eq $logger) 'no logger should be produced'
+    Assert-True ($reason.Length -gt 0) 'the reason should be reported'
+}
+
+Test-Case 'logging that is off produces no logger and no failure' {
+    $p = New-PSTermProfile -Name 'No log'
+    $reason = ''
+    $logger = New-PSTermLogger -Profile $p -Root $sandbox -Failure ([ref]$reason)
+    Assert-True ($null -eq $logger) 'no logger expected'
+    Assert-Equal '' $reason
+}
+
 }
 finally {
     Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue

@@ -204,6 +204,7 @@ function New-PSTermMainWindow {
     $tabs.Font = New-PSTermFont
     $tabs.MaxTabWidth = [int](220 * $scale)
     $tabs.MinTabWidth = [int](100 * $scale)
+    $tabs.AllowReorder = $true
 
     $state.TabStrip = $tabs
     $state.TabHost = $tabHost
@@ -240,6 +241,18 @@ function New-PSTermMainWindow {
     # =====================================================================
     # Behaviour
     # =====================================================================
+
+    # Modem lines change without any event, so a serial tab's status is polled.
+    $signalTimer = New-Object System.Windows.Forms.Timer
+    $signalTimer.Interval = 1000
+    $signalTimer.Add_Tick({
+        $active = Get-PSTermActiveTab -State $state
+        if ($active -and $active.Profile.type -eq 'Serial' -and -not $active.Closed) {
+            Update-PSTermStatus -State $state
+        }
+    }.GetNewClosure())
+    $signalTimer.Start()
+    $form.Add_FormClosed({ $signalTimer.Stop(); $signalTimer.Dispose() }.GetNewClosure())
 
     $tabs.Add_SelectedChanged({
         param($sender, $e)
@@ -484,7 +497,10 @@ function Invoke-PSTermQuickConnect {
 
     # An exact profile name wins over parsing, so saved sessions are reachable by name.
     $profile = Get-PSTermProfileByName -Store $State.Store -Name $text
-    if (-not $profile) { $profile = ConvertFrom-PSTermQuickConnect -Text $text }
+    if (-not $profile) {
+        $profile = ConvertFrom-PSTermQuickConnect -Text $text
+        if ($profile) { [void](Set-PSTermProfileDefaults -Profile $profile -Settings (Import-PSTermSettings -Root $State.Root)) }
+    }
 
     if (-not $profile) {
         Set-PSTermStatusMessage -State $State -Message "Could not interpret '$text'. Try user@host, telnet host, COM3:115200 or cmd." -Level Warning
@@ -515,6 +531,7 @@ function New-PSTermSessionTab {
     $terminal.Dock = 'Fill'
     $terminal.Palette = New-PSTermTerminalPalette -Name ([string]$Profile.terminal.theme)
     $terminal.KeyMap = New-PSTermKeyEncoder -Profile $Profile
+    $terminal.CopyOnSelect = [bool](Import-PSTermSettings -Root $State.Root).copyOnSelect
     $terminal.SetFont((New-PSTermMonospaceFont -Family ([string]$Profile.terminal.fontFamily) -Size ([float]$Profile.terminal.fontSize)))
 
     $State.TabHost.Controls.Add($terminal)
@@ -538,6 +555,7 @@ function New-PSTermSessionTab {
         Logger      = $null
         RemoteTitle = ''
         AutoInputStarted = $false
+        LastLogPath = ''
     }
     $State.Tabs.Add($tab)
     $item.Tag = $tab
@@ -558,6 +576,7 @@ function New-PSTermSessionTab {
         if ($logger) {
             $session.Logger = $logger
             $tab.Logger = $logger
+            $tab.LastLogPath = $logger.Path
         }
         elseif ($loggerFailure) {
             $terminal.Feed("`r`n  Logging is on for this profile but could not be started:`r`n  $loggerFailure`r`n`r`n")
@@ -628,6 +647,13 @@ function New-PSTermSessionTab {
                 }
             }
         }.GetNewClosure())
+
+        # A saved password is answered to the first password prompt, in the compiled
+        # core, so it never passes through a script block on the way out.
+        if ($Profile.type -ne 'Shell' -and $Profile.credentialKey -and (Test-PSTermDpapiAvailable)) {
+            $saved = Get-PSTermSecret -Root $State.Root -Key ([string]$Profile.credentialKey)
+            if ($saved) { $session.SetPassword($saved) }
+        }
 
         $session.Connect()
     }
@@ -778,7 +804,7 @@ function Close-PSTermTab {
     $item = $State.TabStrip.Items[$Index]
     $tab = $State.Tabs | Where-Object { $_.Item -eq $item } | Select-Object -First 1
 
-    if ($tab -and -not $tab.Closed -and -not $Force) {
+    if ($tab -and -not $tab.Closed -and -not $Force -and (Import-PSTermSettings -Root $State.Root).confirmOnClose) {
         $answer = Show-PSTermMessage -Theme $State.Theme -Owner $State.Form `
             -Title 'Close session' -Buttons YesNo `
             -Message "'$($item.Title)' is still connected. Close it?"
@@ -801,7 +827,7 @@ function Confirm-PSTermClose {
     param([Parameter(Mandatory)]$State)
 
     $live = @($State.Tabs | Where-Object { -not $_.Closed })
-    if ($live.Count -gt 0) {
+    if ($live.Count -gt 0 -and (Import-PSTermSettings -Root $State.Root).confirmOnClose) {
         $answer = Show-PSTermMessage -Theme $State.Theme -Owner $State.Form `
             -Title 'Exit' -Buttons YesNo `
             -Message "$($live.Count) session(s) are still connected. Exit PSTerm?"
@@ -850,6 +876,20 @@ function Update-PSTermStatus {
     $parts.Add([string]$tab.Profile.type)
     $parts.Add([string]$tab.Profile.terminal.encoding)
     if ($tab.Logger) { $parts.Add('logging') }
+
+    # Serial lines, live: DTR/RTS are what we drive, CTS/DSR/CD what the device does.
+    # A plus means asserted.
+    if ($tab.Profile.type -eq 'Serial' -and -not $tab.Closed -and $tab.Session -and
+        $tab.Session.Backend -is [PSTerm.Backends.SerialBackend]) {
+        $serial = $tab.Session.Backend
+        $cts = $false; $dsr = $false; $cd = $false
+        if ($serial.TryGetSignals([ref]$cts, [ref]$dsr, [ref]$cd)) {
+            $mark = { param($on) if ($on) { '+' } else { '-' } }
+            $parts.Add(("DTR{0} RTS{1} CTS{2} DSR{3} CD{4}" -f
+                (& $mark $serial.Settings.DtrEnable), (& $mark $serial.Settings.RtsEnable),
+                (& $mark $cts), (& $mark $dsr), (& $mark $cd)))
+        }
+    }
     $parts.Add($(if ($tab.Closed) { 'disconnected' } else { 'connected' }))
 
     $State.StatusRight.Text = ($parts -join '   |   ')

@@ -55,6 +55,13 @@ namespace PSTerm.Render
         private int _hoverIndex = -1;
         private int _hoverCloseIndex = -1;
         private bool _hoverNewTab;
+        private int _dragIndex = -1;
+        private Point _dragStart;
+        private bool _dragging;
+
+        /// <summary>Let tabs be dragged into a new order. Off by default: the profile
+        /// editor uses this strip as a page selector, where the order is fixed.</summary>
+        public bool AllowReorder = false;
         private int _scrollOffset;
 
         // Colours, set by the host from the application theme.
@@ -440,6 +447,8 @@ namespace PSTerm.Render
         {
             base.OnMouseMove(e);
 
+            ContinueDrag(e.Location, e.Button);
+
             bool onClose;
             int index = HitTest(e.Location, out onClose);
             bool onNewTab = NewTabBounds.Contains(e.Location);
@@ -489,7 +498,47 @@ namespace PSTerm.Render
                 return;
             }
 
-            if (e.Button == MouseButtons.Left) SelectedIndex = index;
+            if (e.Button == MouseButtons.Left)
+            {
+                SelectedIndex = index;
+                if (AllowReorder)
+                {
+                    _dragIndex = index;
+                    _dragStart = e.Location;
+                    _dragging = false;
+                }
+            }
+        }
+
+        protected override void OnMouseUp(MouseEventArgs e)
+        {
+            base.OnMouseUp(e);
+            _dragIndex = -1;
+            _dragging = false;
+        }
+
+        /// <summary>
+        /// Carry the dragged tab along as the pointer crosses its neighbours. Done as
+        /// each boundary is crossed rather than on release, so the tab visibly follows
+        /// the pointer.
+        /// </summary>
+        private void ContinueDrag(Point location, MouseButtons buttons)
+        {
+            if (_dragIndex < 0 || (buttons & MouseButtons.Left) == 0) return;
+
+            if (!_dragging)
+            {
+                if (Math.Abs(location.X - _dragStart.X) < SystemInformation.DragSize.Width) return;
+                _dragging = true;
+            }
+
+            bool onClose;
+            int target = HitTest(location, out onClose);
+            if (target >= 0 && target != _dragIndex)
+            {
+                MoveItem(_dragIndex, target);
+                _dragIndex = target;
+            }
         }
 
         private void RaiseClose(int index)
