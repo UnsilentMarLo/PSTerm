@@ -250,6 +250,16 @@ namespace PSTerm.Backends
             catch (IOException) { }
         }
 
+        /// <summary>
+        /// SendBreak on a worker thread. The break is held for its full duration and
+        /// the driver call can stall on a USB adapter, so calling it from a click
+        /// handler froze the window. Returns at once.
+        /// </summary>
+        public void SendBreakAsync(int milliseconds)
+        {
+            ThreadPool.QueueUserWorkItem(delegate { SendBreak(milliseconds); });
+        }
+
         public void SetSignal(bool dtr, bool rts)
         {
             SerialPort port = _port;

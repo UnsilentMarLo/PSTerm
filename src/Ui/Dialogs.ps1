@@ -37,6 +37,9 @@ function New-PSTermFieldGrid {
     $grid.Padding = New-Object System.Windows.Forms.Padding(8)
     [void]$grid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('AutoSize')))
     [void]$grid.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Percent', 100)))
+    # Every Add would otherwise re-run an auto-size table layout over all the rows
+    # so far. The caller resumes layout once, when the grid is complete.
+    $grid.SuspendLayout()
     $grid
 }
 
@@ -317,6 +320,10 @@ function Invoke-PSTermEditProfile {
 
     $dialog.Controls.Add($pageHost)
     $dialog.Controls.Add($buttonRow)
+
+    foreach ($grid in @($general, $sshGrid, $telnetGrid, $serialGrid, $shellGrid, $termGrid, $logGrid, $autoGrid)) {
+        $grid.ResumeLayout($false)
+    }
 
     # Show only the panel for the selected transport.
     $updateVisibility = {
@@ -832,7 +839,9 @@ function Invoke-PSTermSendBreak {
 
     $backend = $tab.Session.Backend
     if ($backend -is [PSTerm.Backends.SerialBackend]) {
-        $backend.SendBreak(300)
+        # Asynchronous: the break is held for 300 ms and the USB driver call can
+        # stall, which used to freeze the window.
+        $backend.SendBreakAsync(300)
         Set-PSTermStatusMessage -State $State -Message 'Break sent.'
     }
     else {

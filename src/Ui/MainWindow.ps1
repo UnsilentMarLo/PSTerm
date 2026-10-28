@@ -323,6 +323,7 @@ function New-PSTermMainWindow {
     }.GetNewClosure())
 
     $form.Add_Shown({
+        [PSTerm.Render.FontProbe]::Warm()
         Set-PSTermTitleBarTheme -Form $state.Form -Dark ($state.Theme.Mode -eq 'Dark')
         Update-PSTermTree -State $state
         $state.QuickBox.Focus() | Out-Null

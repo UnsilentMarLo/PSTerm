@@ -546,27 +546,8 @@ function Get-PSTermAvailableMonospaceFonts {
     .SYNOPSIS
         Installed fonts that are safe to use for a terminal grid.
     #>
-    $result = New-Object System.Collections.Generic.List[string]
-    try {
-        $collection = New-Object System.Drawing.Text.InstalledFontCollection
-        foreach ($family in $collection.Families) {
-            try {
-                if (-not $family.IsStyleAvailable([System.Drawing.FontStyle]::Regular)) { continue }
-                # A proportional face makes the grid unusable, so measure two glyphs
-                # of very different width and keep only families where they match.
-                $font = New-Object System.Drawing.Font($family, 10)
-                try {
-                    $wide = [System.Windows.Forms.TextRenderer]::MeasureText('W', $font, (New-Object System.Drawing.Size(1000, 100)), 'NoPadding')
-                    $thin = [System.Windows.Forms.TextRenderer]::MeasureText('i', $font, (New-Object System.Drawing.Size(1000, 100)), 'NoPadding')
-                    if ($wide.Width -eq $thin.Width) { $result.Add($family.Name) }
-                }
-                finally { $font.Dispose() }
-            }
-            catch { }
-        }
-    }
-    catch { }
-
-    if ($result.Count -eq 0) { $result.Add('Consolas') }
-    $result | Sort-Object -Unique
+    # Compiled and cached: probing every installed family from a PowerShell loop
+    # froze the window for seconds each time the profile editor opened. The main
+    # window starts the search in the background, so this normally returns at once.
+    [PSTerm.Render.FontProbe]::GetMonospaceFamilies()
 }
