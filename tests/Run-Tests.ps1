@@ -521,6 +521,41 @@ Test-Case 'resize keeps the cursor inside the grid' {
     Assert-True ($t.CursorX -lt 5) "cursor col $($t.CursorX)"
 }
 
+Test-Case 'a terminal grown past its start-up size still scrolls into history' {
+    # Start-up is 80x24 and the real window arrives later. The scroll region used
+    # to stay at the old bottom row, so output scrolled inside it and never
+    # reached the scrollback.
+    $t = New-Term -Cols 20 -Rows 5 -Scrollback 100
+    $t.Resize(20, 12)
+    for ($i = 1; $i -le 40; $i++) { Write-Term $t "line $i`r`n" }
+    Assert-True ($t.Screen.HistoryCount -ge 28) "history was $($t.Screen.HistoryCount)"
+    Assert-Equal 'line 1' ($t.Screen.GetLineText(0))
+}
+
+Test-Case 'shrinking drops blank lines below the cursor instead of the output above it' {
+    $t = New-Term -Cols 20 -Rows 10 -Scrollback 50
+    Write-Term $t "first`r`nsecond"
+    $t.Resize(20, 4)
+    Assert-Equal 0 $t.Screen.HistoryCount
+    Assert-Equal 'first' (Get-Row $t 0)
+    Assert-Equal 'second' (Get-Row $t 1)
+}
+
+Test-Case 'shrinking past the cursor moves the top lines into history' {
+    $t = New-Term -Cols 20 -Rows 6 -Scrollback 50
+    for ($i = 1; $i -le 6; $i++) { Write-Term $t "r$i`r`n" }
+    $t.Resize(20, 3)
+    Assert-True ($t.Screen.HistoryCount -ge 3) "history was $($t.Screen.HistoryCount)"
+    Assert-True ($t.CursorY -lt 3) "cursor row $($t.CursorY)"
+}
+
+Test-Case 'a scrolled-off line is counted even once the ring is full' {
+    $t = New-Term -Cols 10 -Rows 3 -Scrollback 4
+    for ($i = 0; $i -lt 30; $i++) { Write-Term $t "x$i`r`n" }
+    Assert-True ($t.Screen.ScrolledLines -ge 28) "scrolled $($t.Screen.ScrolledLines)"
+    Assert-Equal 4 $t.Screen.HistoryCount
+}
+
 # ---------------------------------------------------------------- reports ---
 
 Write-Host "`nDevice reports" -ForegroundColor Yellow

@@ -372,10 +372,9 @@ namespace PSTerm.Render
         {
             lock (_sync)
             {
+                long before = _term.Primary.ScrolledLines;
                 _term.Write(buffer, offset, count);
-                // Output pins the view to the bottom, which is what every terminal
-                // does and what users expect when a device starts talking.
-                if (_scrollOffset != 0) _scrollOffset = 0;
+                HoldViewport(before);
             }
             _needsPaint = true;
         }
@@ -384,10 +383,35 @@ namespace PSTerm.Render
         {
             lock (_sync)
             {
+                long before = _term.Primary.ScrolledLines;
                 _term.Write(text);
-                if (_scrollOffset != 0) _scrollOffset = 0;
+                HoldViewport(before);
             }
             _needsPaint = true;
+        }
+
+        /// <summary>
+        /// Keep a scrolled-back view on the same text while output arrives. Snapping
+        /// to the bottom on every chunk made scrollback unusable on a device that logs
+        /// asynchronously (a switch reporting link changes), because the view was
+        /// thrown back the moment anything was printed. Typing still returns to the
+        /// bottom. Call with the lock held.
+        /// </summary>
+        private void HoldViewport(long scrolledBefore)
+        {
+            if (_scrollOffset == 0) return;
+
+            if (_term.IsAlternateScreen)
+            {
+                _scrollOffset = 0;
+                return;
+            }
+
+            long moved = _term.Primary.ScrolledLines - scrolledBefore;
+            long next = _scrollOffset + moved;
+            long history = _term.Primary.HistoryCount;
+            if (next > history) next = history;
+            _scrollOffset = (int)next;
         }
 
         public void SetFont(Font font)
@@ -547,7 +571,16 @@ namespace PSTerm.Render
         {
             if (_term == null || _cellWidth <= 0 || _cellHeight <= 0) return;
 
-            int usableWidth = ClientSize.Width - (_scrollBar != null && _scrollBar.Visible ? _scrollBar.Width : 0);
+            // Before first layout, and while minimised, the client area is empty. A
+            // 1x1 grid is no use to anyone and resizing to it pushed the screen into
+            // the scrollback, which left a new session's first prompt at the bottom
+            // of the window under a page of blank history.
+            if (ClientSize.Width <= 0 || ClientSize.Height <= 0) return;
+
+            // The bar's width is always reserved, shown or not. Reserving it only
+            // while visible changed the column count the moment the first line
+            // scrolled off, and shrinking the grid truncates every line on screen.
+            int usableWidth = ClientSize.Width - (_scrollBar != null ? _scrollBar.Width : 0);
             int cols = Math.Max(1, usableWidth / _cellWidth);
             int rows = Math.Max(1, ClientSize.Height / _cellHeight);
 
@@ -579,6 +612,9 @@ namespace PSTerm.Render
         protected override void OnHandleCreated(EventArgs e)
         {
             base.OnHandleCreated(e);
+            // 12px is a hairline on a scaled display; follow the control's DPI.
+            if (_scrollBar != null)
+                _scrollBar.Width = Math.Max(12, (int)Math.Round(12 * DeviceDpi / 96.0));
             MeasureCell();
             RecalculateGrid();
         }
@@ -594,30 +630,25 @@ namespace PSTerm.Render
             int history;
             lock (_sync) { history = _term.IsAlternateScreen ? 0 : _term.Primary.HistoryCount; }
 
-            bool needed = history > 0;
-            if (_scrollBar.Visible != needed)
-            {
-                _scrollBar.Visible = needed;
-                // Showing or hiding the bar changes the usable width, so the grid
-                // has to be recomputed - but only once, guarded by the flag.
-                if (!_updatingScrollBar)
-                {
-                    _updatingScrollBar = true;
-                    try { RecalculateGrid(); }
-                    finally { _updatingScrollBar = false; }
-                }
-            }
-            if (!needed) return;
+            int rows = _term.Rows;
+            int offset = _scrollOffset;
+
+            if (_scrollBar.Visible != (history > 0)) _scrollBar.Visible = history > 0;
+            if (history <= 0) return;
+
+            // The thumb spans a page, so the track covers history plus one screen
+            // and Value runs 0..history, top of the scrollback to the live bottom.
+            // A Maximum of just `history` made the last page unreachable: dragging
+            // to the end stopped a screenful short of the bottom.
+            int maximum = history + rows - 1;
+            int value = Math.Max(0, Math.Min(history, history - offset));
 
             _updatingScrollBar = true;
             try
             {
-                _scrollBar.Minimum = 0;
-                _scrollBar.Maximum = history;
-                _scrollBar.LargeChange = Math.Max(1, _term.Rows);
-                _scrollBar.SmallChange = 1;
-                int value = history - _scrollOffset;
-                _scrollBar.Value = Math.Max(0, Math.Min(_scrollBar.Maximum, value));
+                if (_scrollBar.LargeChange != rows) _scrollBar.LargeChange = rows;
+                if (_scrollBar.Maximum != maximum) _scrollBar.Maximum = maximum;
+                _scrollBar.Value = value;
             }
             finally { _updatingScrollBar = false; }
         }
@@ -625,29 +656,38 @@ namespace PSTerm.Render
         private void OnScrollBarChanged(object sender, EventArgs e)
         {
             if (_updatingScrollBar) return;
-            int history;
-            lock (_sync) { history = _term.Primary.HistoryCount; }
-            _scrollOffset = Math.Max(0, history - _scrollBar.Value);
+            lock (_sync)
+            {
+                int history = _term.IsAlternateScreen ? 0 : _term.Primary.HistoryCount;
+                _scrollOffset = Math.Max(0, Math.Min(history, history - _scrollBar.Value));
+            }
             InvalidateAll();
         }
 
         public void ScrollLines(int delta)
         {
-            int history;
-            lock (_sync) { history = _term.IsAlternateScreen ? 0 : _term.Primary.HistoryCount; }
-            int next = _scrollOffset + delta;
-            if (next < 0) next = 0;
-            if (next > history) next = history;
-            if (next == _scrollOffset) return;
-            _scrollOffset = next;
+            // Under the lock: the transport thread moves _scrollOffset as well, and
+            // an unlocked read-modify-write here could throw its adjustment away.
+            lock (_sync)
+            {
+                int history = _term.IsAlternateScreen ? 0 : _term.Primary.HistoryCount;
+                int next = _scrollOffset + delta;
+                if (next < 0) next = 0;
+                if (next > history) next = history;
+                if (next == _scrollOffset) return;
+                _scrollOffset = next;
+            }
             UpdateScrollBar();
             InvalidateAll();
         }
 
         public void ScrollToBottom()
         {
-            if (_scrollOffset == 0) return;
-            _scrollOffset = 0;
+            lock (_sync)
+            {
+                if (_scrollOffset == 0) return;
+                _scrollOffset = 0;
+            }
             UpdateScrollBar();
             InvalidateAll();
         }
@@ -694,6 +734,10 @@ namespace PSTerm.Render
         {
             if (!_needsPaint) return;
             _needsPaint = false;
+            // New output adds history, scrolls the view or leaves the alternate
+            // screen; none of those pass through the scroll bar, so it is brought
+            // up to date here. Without this the bar never appeared on its own.
+            UpdateScrollBar();
             Invalidate();
         }
 
@@ -1332,6 +1376,23 @@ namespace PSTerm.Render
             if (e.Button == MouseButtons.Middle)
             {
                 PasteClipboard();
+                return;
+            }
+
+            // Right click as Windows Terminal does it: with a selection it copies
+            // and drops the selection, without one it pastes. This used to fall
+            // through every branch and do nothing.
+            if (e.Button == MouseButtons.Right)
+            {
+                if (_hasSelection)
+                {
+                    CopySelection();
+                    ClearSelection();
+                }
+                else
+                {
+                    PasteClipboard();
+                }
                 return;
             }
 

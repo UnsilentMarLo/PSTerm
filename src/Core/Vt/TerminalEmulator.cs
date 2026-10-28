@@ -223,8 +223,13 @@ namespace PSTerm.Vt
             }
 
             ResetTabStops();
-            // A scroll region that no longer fits is reset, as xterm does.
-            if (_scrollBottom >= rows || _scrollTop >= _scrollBottom) ResetScrollRegion();
+            // The scroll region is reset on every resize, as xterm does. Keeping a
+            // region that "still fits" was the reason a terminal grown past its first
+            // size (80x24 at start-up, then the real window) kept scrolling inside the
+            // old 24 rows: that is a region scroll, which never enters the scrollback,
+            // so the view stopped scrolling and the history stayed empty. Programs
+            // that use margins set them again on the size change.
+            ResetScrollRegion();
             _pendingWrap = false;
             _active.MarkAllDirty();
         }

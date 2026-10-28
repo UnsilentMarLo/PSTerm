@@ -44,8 +44,9 @@ namespace PSTerm.Vt
             int copy = Math.Min(cols, Cells.Length);
             Array.Copy(Cells, next, copy);
             for (int i = copy; i < cols; i++) next[i] = fill;
-            Cells = next;
+            // Checked against the old width: a truncated line no longer continues.
             if (cols < Cells.Length) Wrapped = false;
+            Cells = next;
         }
 
         /// <summary>Index one past the last non-blank cell, for trimming on copy.</summary>
@@ -80,6 +81,7 @@ namespace PSTerm.Vt
 
         private bool[] _dirty;
         private bool _allDirty;
+        private long _scrolledLines;
 
         public int CursorX;
         public int CursorY;
@@ -108,6 +110,13 @@ namespace PSTerm.Vt
         /// <summary>Number of lines scrolled off the top and still retained.</summary>
         public int HistoryCount { get { return _count - _rows; } }
         public int TotalLines { get { return _count; } }
+
+        /// <summary>
+        /// Total lines that have ever scrolled off the top. Unlike HistoryCount it
+        /// keeps rising once the ring is full, so a viewer can tell how far the
+        /// content moved and hold its place in the scrollback.
+        /// </summary>
+        public long ScrolledLines { get { return _scrolledLines; } }
 
         // ---- damage -------------------------------------------------------
 
@@ -236,6 +245,7 @@ namespace PSTerm.Vt
         /// <summary>Scroll the full screen up by one, retiring the top line into history.</summary>
         private void ScrollWholeScreenUp(Cell blank)
         {
+            _scrolledLines++;
             Line recycled;
             if (_count < _ring.Length)
             {
@@ -338,9 +348,19 @@ namespace PSTerm.Vt
                 }
                 else
                 {
-                    // Shrinking: the top lines of the viewport move into history.
+                    // Shrinking: blank lines below the cursor are simply dropped, as in
+                    // xterm; only what is still needed moves the top of the viewport
+                    // into history. Pushing the top out unconditionally scrolled a
+                    // fresh session's output away as soon as the window got smaller.
                     int shrink = _rows - rows;
-                    cursorShift = -shrink;
+                    int spare = 0;
+                    for (int r = _rows - 1; r > CursorY && spare < shrink; r--)
+                    {
+                        if (GetRow(r).TrimmedLength() > 0) break;
+                        spare++;
+                    }
+                    _count -= spare;
+                    cursorShift = -(shrink - spare);
                 }
 
                 // Compact the ring into the new array, dropping the oldest lines that
