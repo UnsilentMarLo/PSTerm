@@ -15,6 +15,8 @@ using System;
 using System.ComponentModel;
 using System.Text;
 using System.Threading;
+using System.Text.RegularExpressions;
+using PSTerm.Automation;
 using PSTerm.Backends;
 using PSTerm.Io;
 using PSTerm.Vt;
@@ -123,7 +125,7 @@ namespace PSTerm
         public string CloseReason { get { return _closeReason; } }
         /// <summary>How many chunks of host output have arrived. Lets a script tell
         /// whether anything has been heard since it last sent something.</summary>
-        public int DataChunks { get { return Thread.VolatileRead(ref _dataChunks); } }
+        public int DataChunks { get { return Volatile.Read(ref _dataChunks); } }
         /// <summary>Milliseconds since the host last sent anything.</summary>
         public int IdleMilliseconds { get { return unchecked(Environment.TickCount - _lastDataTick); } }
         /// <summary>The most recent title the host asked for.</summary>
@@ -164,7 +166,68 @@ namespace PSTerm
 
             int charCount;
             char[] chars = _decoder.Decode(e.Buffer, e.Offset, e.Count, out charCount);
-            if (charCount > 0) _sink.Feed(chars, 0, charCount);
+            if (charCount > 0)
+            {
+                _sink.Feed(chars, 0, charCount);
+
+                ExpectEngine expect = _expect;
+                if (expect != null) expect.Feed(chars, 0, charCount);
+            }
+        }
+
+        // =====================================================================
+        // Prompt automation
+        // =====================================================================
+
+        private ExpectEngine _expect;
+
+        /// <summary>Raised on the UI thread when a rule added with notify set matches.
+        /// The message is the rule's name.</summary>
+        public event EventHandler<SessionMessageEventArgs> RuleMatched;
+
+        /// <summary>The prompt-answering engine, created on first use.</summary>
+        public ExpectEngine Expect
+        {
+            get
+            {
+                if (_expect == null) _expect = new ExpectEngine(Send);
+                return _expect;
+            }
+        }
+
+        /// <summary>
+        /// Answer a prompt. <paramref name="pattern"/> is a regular expression matched
+        /// against the line the host is waiting on; <paramref name="reply"/> is sent
+        /// after <paramref name="delayMs"/>. Written for PowerShell callers, which
+        /// cannot construct a rule with a callback of their own.
+        /// </summary>
+        public void AddRule(string name, string pattern, string reply, int delayMs, bool once,
+                            bool armed, int expireAfterMs, string[] arms, bool notify)
+        {
+            ExpectRule rule = new ExpectRule();
+            rule.Name = name;
+            rule.Pattern = new Regex(pattern, RegexOptions.IgnoreCase);
+            rule.Reply = reply;
+            rule.DelayMs = delayMs;
+            rule.Once = once;
+            rule.Armed = armed;
+            rule.ExpireAfterMs = expireAfterMs;
+            rule.Arms = arms ?? new string[0];
+
+            if (notify)
+            {
+                rule.OnMatch = delegate(ExpectRule r, string line)
+                {
+                    string ruleName = r.Name;
+                    RaiseOnUi(new Action(delegate
+                    {
+                        EventHandler<SessionMessageEventArgs> h = RuleMatched;
+                        if (h != null) h(this, new SessionMessageEventArgs(ruleName));
+                    }));
+                };
+            }
+
+            Expect.Add(rule);
         }
 
         // =====================================================================

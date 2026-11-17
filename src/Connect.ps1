@@ -23,6 +23,35 @@ function ConvertTo-PSTermEnum {
     catch { return $Default }
 }
 
+function New-PSTermSshOptions {
+    <#
+    .SYNOPSIS
+        The ssh launch options a profile describes.
+    #>
+    param([Parameter(Mandatory)]$Profile, [string]$User = '')
+
+    $options = New-Object PSTerm.Backends.SshLaunchOptions
+    $options.Host = $Profile.ssh.host
+    $options.User = if ($Profile.ssh.user) { $Profile.ssh.user } else { $User }
+    $options.Port = [int]$Profile.ssh.port
+    $options.IdentityFile = $Profile.ssh.identityFile
+    $options.ProxyJump = $Profile.ssh.proxyJump
+    $options.RemoteCommand = $Profile.ssh.remoteCommand
+    $options.ForwardAgent = [bool]$Profile.ssh.forwardAgent
+    $options.Compression = [bool]$Profile.ssh.compression
+    $options.AllowLegacyAlgorithms = [bool]$Profile.ssh.allowLegacyAlgorithms
+    $options.KeepAliveSeconds = [int]$Profile.ssh.keepAliveSeconds
+    foreach ($extra in @($Profile.ssh.extraOptions)) {
+        if ($extra) { $options.ExtraOptions.Add([string]$extra) }
+    }
+    # Trust a host key seen for the first time without asking. "accept-new"
+    # still refuses a key that has CHANGED, which is the case that matters.
+    if ($Profile.ssh.autoAcceptHostKey) {
+        $options.ExtraOptions.Add('StrictHostKeyChecking=accept-new')
+    }
+    $options
+}
+
 function New-PSTermBackend {
     <#
     .SYNOPSIS
@@ -32,7 +61,10 @@ function New-PSTermBackend {
     param(
         [Parameter(Mandatory)]$Profile,
         [int]$Cols = 80,
-        [int]$Rows = 24
+        [int]$Rows = 24,
+        # The user name to connect as when the profile does not hold one (it came
+        # from the folder, the global default or a prompt).
+        [string]$User = ''
     )
 
     switch ($Profile.type) {
@@ -42,23 +74,10 @@ function New-PSTermBackend {
                 throw 'This SSH profile has no host set.'
             }
 
-            $options = New-Object PSTerm.Backends.SshLaunchOptions
-            $options.Host = $Profile.ssh.host
-            $options.User = $Profile.ssh.user
-            $options.Port = [int]$Profile.ssh.port
-            $options.IdentityFile = $Profile.ssh.identityFile
-            $options.ProxyJump = $Profile.ssh.proxyJump
-            $options.RemoteCommand = $Profile.ssh.remoteCommand
-            $options.ForwardAgent = [bool]$Profile.ssh.forwardAgent
-            $options.Compression = [bool]$Profile.ssh.compression
-            $options.AllowLegacyAlgorithms = [bool]$Profile.ssh.allowLegacyAlgorithms
-            $options.KeepAliveSeconds = [int]$Profile.ssh.keepAliveSeconds
-            foreach ($extra in @($Profile.ssh.extraOptions)) {
-                if ($extra) { $options.ExtraOptions.Add([string]$extra) }
-            }
+            $options = New-PSTermSshOptions -Profile $Profile -User $User
 
             $commandLine = [PSTerm.Backends.ConPtyCommands]::BuildSshCommandLine($options)
-            $label = if ($Profile.ssh.user) { "$($Profile.ssh.user)@$($Profile.ssh.host)" } else { $Profile.ssh.host }
+            $label = if ($options.User) { "$($options.User)@$($Profile.ssh.host)" } else { $Profile.ssh.host }
 
             $backend = New-Object PSTerm.Backends.ConPtyBackend($commandLine, $null, $label)
             $backend.SetInitialSize($Cols, $Rows)

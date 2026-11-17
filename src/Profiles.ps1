@@ -45,6 +45,13 @@ function New-PSTermProfile {
         type   = $Type
         notes  = ''
 
+        # True while the name is only a placeholder (the address, or "New
+        # connection"): the name is replaced by the device's own once it is known.
+        autoName = $false
+
+        # Tab marking: '' or one of Red, Orange, Yellow, Green, Blue, Purple, Grey.
+        mark = ''
+
         ssh = [pscustomobject]@{
             host                  = ''
             user                  = ''
@@ -54,6 +61,8 @@ function New-PSTermProfile {
             forwardAgent          = $false
             compression           = $false
             allowLegacyAlgorithms = $false
+            # Accept an unknown host key without asking (a changed key is still refused).
+            autoAcceptHostKey     = $false
             keepAliveSeconds      = 30
             remoteCommand         = ''
             extraOptions          = @()
@@ -108,12 +117,22 @@ function New-PSTermProfile {
         }
 
         # Lines sent after connecting, as plain text in profiles.json. Never put a
-        # password here. For SSH use a key; the credential store below is not yet
-        # wired into the login.
+        # password here: use the password field or a quick credential.
         autoInput = @()
 
-        # Key into the DPAPI store, not the secret itself. Reserved: nothing reads it
-        # when connecting yet.
+        # Entering privileged mode after login (Cisco "enable"). The secret comes
+        # from a quick credential, so it is stored encrypted like any other.
+        autoEnable = [pscustomobject]@{
+            enabled      = $false
+            command      = 'enable'
+            delayMs      = 500
+            credentialId = ''
+            # Some devices ask "Username:" before the enable password; most do not.
+            useUsername  = $false
+        }
+
+        # Key into the DPAPI store holding this connection's login password. The
+        # password itself is never written to profiles.json.
         credentialKey = ''
     }
 }
@@ -137,6 +156,8 @@ function Import-PSTermProfiles {
         $store = [pscustomobject]@{
             version  = $script:ProfileSchemaVersion
             folders  = @()
+            pinned   = @()
+            credentials = @()
             profiles = @(New-PSTermSampleProfiles)
         }
         Save-PSTermProfiles -Root $Root -Store $store
@@ -157,6 +178,8 @@ function Import-PSTermProfiles {
         $store = [pscustomobject]@{
             version  = $script:ProfileSchemaVersion
             folders  = @()
+            pinned   = @()
+            credentials = @()
             profiles = @(New-PSTermSampleProfiles)
         }
         Save-PSTermProfiles -Root $Root -Store $store
@@ -179,11 +202,41 @@ function Import-PSTermProfiles {
         $profiles += (Merge-PSTermProfileDefaults -Profile $p)
     }
 
-    [pscustomobject]@{
-        version  = $script:ProfileSchemaVersion
-        folders  = @(if ($data.PSObject.Properties.Name -contains 'folders') { $data.folders } else { @() })
-        profiles = $profiles
+    # Folders are records with their own default settings. Older files held plain
+    # path strings (or nothing), which are upgraded in place.
+    $folders = @()
+    if ($data.PSObject.Properties.Name -contains 'folders') {
+        foreach ($f in @($data.folders)) {
+            if ($null -eq $f) { continue }
+            $folders += (ConvertTo-PSTermFolderRecord -Value $f)
+        }
     }
+
+    [pscustomobject]@{
+        version     = $script:ProfileSchemaVersion
+        folders     = $folders
+        pinned      = @(if ($data.PSObject.Properties.Name -contains 'pinned') { @($data.pinned) | Where-Object { $_ } } else { @() })
+        credentials = @(if ($data.PSObject.Properties.Name -contains 'credentials') { @($data.credentials) | Where-Object { $_ } } else { @() })
+        profiles    = $profiles
+    }
+}
+
+function ConvertTo-PSTermFolderRecord {
+    <#
+    .SYNOPSIS
+        A folder record: its path and the defaults new connections in it start from.
+    #>
+    param([Parameter(Mandatory)]$Value)
+
+    if ($Value -is [string]) {
+        return [pscustomobject]@{ path = $Value; defaults = $null }
+    }
+
+    $defaults = $null
+    if ($Value.PSObject.Properties.Name -contains 'defaults' -and $Value.defaults) {
+        $defaults = Merge-PSTermProfileDefaults -Profile $Value.defaults
+    }
+    [pscustomobject]@{ path = [string]$Value.path; defaults = $defaults }
 }
 
 function Merge-PSTermProfileDefaults {
@@ -294,6 +347,8 @@ function Convert-PSTermV1Profiles {
     [pscustomobject]@{
         version  = $script:ProfileSchemaVersion
         folders  = @()
+        pinned   = @()
+        credentials = @()
         profiles = $list
     }
 }

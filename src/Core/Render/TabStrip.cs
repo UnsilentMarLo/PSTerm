@@ -34,11 +34,20 @@ namespace PSTerm.Render
         /// <summary>Extra detail shown on hover.</summary>
         public string Tooltip = "";
         public TabState State = TabState.Connecting;
+        /// <summary>A colour the operator gave the tab to flag its importance, or Empty.</summary>
+        public Color Mark = Color.Empty;
         /// <summary>Anything the host wants to associate with this tab.</summary>
         public object Tag;
 
         internal Rectangle Bounds;
         internal Rectangle CloseBounds;
+    }
+
+    public class TabStripMenuEventArgs : EventArgs
+    {
+        public readonly int Index;
+        public readonly Point ScreenLocation;
+        public TabStripMenuEventArgs(int index, Point screenLocation) { Index = index; ScreenLocation = screenLocation; }
     }
 
     public class TabStripEventArgs : EventArgs
@@ -83,13 +92,15 @@ namespace PSTerm.Render
         /// <summary>Size tabs to their widest label instead of filling the strip.</summary>
         public bool SizeToContent = false;
 
-        private const int NewTabButtonWidth = 30;
+        private const int NewTabButtonWidth = 34;
 
         private ToolTip _toolTip;
 
         public event EventHandler<TabStripEventArgs> SelectedChanged;
         public event EventHandler<TabStripEventArgs> CloseRequested;
         public event EventHandler NewTabRequested;
+        /// <summary>Right-click on a tab (Index) or on empty strip (Index -1).</summary>
+        public event EventHandler<TabStripMenuEventArgs> ContextRequested;
 
         public TabStrip()
         {
@@ -274,7 +285,11 @@ namespace PSTerm.Render
             get
             {
                 if (!ShowNewTabButton) return Rectangle.Empty;
-                return new Rectangle(Width - NewTabButtonWidth, 0, NewTabButtonWidth, Height);
+                // Straight after the last tab while there is room, then pinned to the
+                // right edge, which is where a browser puts it too.
+                int afterTabs = _items.Count * TabWidth - _scrollOffset;
+                int x = Math.Min(afterTabs + 4, Width - NewTabButtonWidth);
+                return new Rectangle(Math.Max(0, x), 3, NewTabButtonWidth, Height - 7);
             }
         }
 
@@ -326,6 +341,16 @@ namespace PSTerm.Render
             {
                 using (SolidBrush accent = new SolidBrush(AccentColor))
                     g.FillRectangle(accent, item.Bounds.Left, 0, item.Bounds.Width, 2);
+            }
+
+            if (!item.Mark.IsEmpty)
+            {
+                // A coloured band along the foot of the tab, and a tint behind it, so a
+                // marked tab is findable in a long row without reading the labels.
+                using (SolidBrush tint = new SolidBrush(Color.FromArgb(28, item.Mark)))
+                    g.FillRectangle(tint, item.Bounds.Left, 2, item.Bounds.Width, Height - 5);
+                using (SolidBrush bar = new SolidBrush(item.Mark))
+                    g.FillRectangle(bar, item.Bounds.Left, Height - 4, item.Bounds.Width, 3);
             }
 
             using (Pen divider = new Pen(BorderColor))
@@ -402,17 +427,36 @@ namespace PSTerm.Render
         {
             Rectangle bounds = NewTabBounds;
 
-            using (SolidBrush brush = new SolidBrush(_hoverNewTab ? HoverTabBackground : StripBackground))
-                g.FillRectangle(brush, bounds);
+            if (_hoverNewTab)
+            {
+                using (SolidBrush brush = new SolidBrush(HoverTabBackground))
+                using (GraphicsPath path = RoundedRect(bounds, 6))
+                    g.FillPath(brush, path);
+            }
 
             Color color = _hoverNewTab ? TextColor : MutedTextColor;
-            using (Pen pen = new Pen(color, 1.5f))
+            using (Pen pen = new Pen(color, 1.8f))
             {
+                pen.StartCap = LineCap.Round;
+                pen.EndCap = LineCap.Round;
                 int cx = bounds.Left + bounds.Width / 2;
                 int cy = bounds.Top + bounds.Height / 2;
-                g.DrawLine(pen, cx - 5, cy, cx + 5, cy);
-                g.DrawLine(pen, cx, cy - 5, cx, cy + 5);
+                int arm = Math.Max(5, bounds.Height / 5);
+                g.DrawLine(pen, cx - arm, cy, cx + arm, cy);
+                g.DrawLine(pen, cx, cy - arm, cx, cy + arm);
             }
+        }
+
+        private static GraphicsPath RoundedRect(Rectangle r, int radius)
+        {
+            GraphicsPath path = new GraphicsPath();
+            int d = radius * 2;
+            path.AddArc(r.Left, r.Top, d, d, 180, 90);
+            path.AddArc(r.Right - d, r.Top, d, d, 270, 90);
+            path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            path.AddArc(r.Left, r.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
         }
 
         // =====================================================================
@@ -424,7 +468,7 @@ namespace PSTerm.Render
             onClose = false;
             LayoutTabs();
 
-            if (ShowNewTabButton && location.X >= Width - NewTabButtonWidth) return -1;
+            if (ShowNewTabButton && NewTabBounds.Contains(location)) return -1;
 
             for (int i = 0; i < _items.Count; i++)
             {
@@ -452,7 +496,7 @@ namespace PSTerm.Render
                 Invalidate();
 
                 string tip = "";
-                if (onNewTab) tip = "New session";
+                if (onNewTab) tip = "New connection (Ctrl+Shift+T)";
                 else if (index >= 0) tip = string.IsNullOrEmpty(_items[index].Tooltip) ? _items[index].Title : _items[index].Tooltip;
                 if (_toolTip.GetToolTip(this) != tip) _toolTip.SetToolTip(this, tip);
             }
@@ -480,6 +524,14 @@ namespace PSTerm.Render
 
             bool onClose;
             int index = HitTest(e.Location, out onClose);
+
+            if (e.Button == MouseButtons.Right)
+            {
+                EventHandler<TabStripMenuEventArgs> menu = ContextRequested;
+                if (menu != null) menu(this, new TabStripMenuEventArgs(index, PointToScreen(e.Location)));
+                return;
+            }
+
             if (index < 0) return;
 
             // Middle-click closes anywhere on the tab, as in a browser.

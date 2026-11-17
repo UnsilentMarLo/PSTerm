@@ -9,6 +9,9 @@
 
 Set-StrictMode -Version Latest
 
+# The tooltip set the editor is currently filling in, so Add-PSTermField can attach tips.
+$script:DialogTips = $null
+
 # =============================================================================
 # Small layout helpers
 # =============================================================================
@@ -48,13 +51,17 @@ function Add-PSTermField {
     .SYNOPSIS
         Add a labelled control to a field grid and return the control.
     #>
-    param($Grid, [string]$Label, $Control, $Theme)
+    param($Grid, [string]$Label, $Control, $Theme, [string]$Tip = '', $Tips = $null)
+
+    # A tooltip on the label as well as the field: the label is what people hover.
+    if (-not $Tips) { $Tips = $script:DialogTips }
 
     $row = $Grid.RowCount
     $Grid.RowCount = $row + 1
     [void]$Grid.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('AutoSize')))
 
-    $Grid.Controls.Add((New-PSTermLabel -Text $Label -Theme $Theme), 0, $row)
+    $labelControl = New-PSTermLabel -Text $Label -Theme $Theme
+    $Grid.Controls.Add($labelControl, 0, $row)
     $Control.Dock = 'Fill'
     $Control.Margin = New-Object System.Windows.Forms.Padding(3)
     # A combo box will not take an arbitrary height, so the row is matched to it
@@ -63,7 +70,26 @@ function Add-PSTermField {
         $Control.ItemHeight = [int]($Control.Font.Height * 1.25)
     }
     $Grid.Controls.Add($Control, 1, $row)
+
+    if ($Tips -and $Tip) {
+        $Tips.SetTip($Control, $Tip)
+        $Tips.SetTip($labelControl, $Tip)
+        # A password panel holds its own box; the tip belongs on that too.
+        if ($Control.Tag -is [System.Windows.Forms.TextBox]) { $Tips.SetTip($Control.Tag, $Tip) }
+    }
     $Control
+}
+
+function Hide-PSTermField {
+    <#
+    .SYNOPSIS
+        Hide a field and its label, for the folder-defaults view of the editor.
+    #>
+    param($Grid, $Control)
+    $position = $Grid.GetPositionFromControl($Control)
+    $label = $Grid.GetControlFromPosition(0, $position.Row)
+    if ($label) { $label.Visible = $false }
+    $Control.Visible = $false
 }
 
 function New-PSTermTextField { param([string]$Value = '')
@@ -113,123 +139,180 @@ function ConvertTo-PSTermInt {
 function Invoke-PSTermEditProfile {
     <#
     .SYNOPSIS
-        Create or edit a profile. Saves to the store on OK.
+        Create or edit a connection, or - with -FolderMode - the default settings
+        that new connections in a folder start from. Saves to the store on OK.
+    .OUTPUTS
+        The saved profile, or $null when cancelled.
     #>
     param(
         [Parameter(Mandatory)]$State,
-        $Profile
+        $Profile,
+        # The folder a new connection is created in.
+        [string]$Folder = '',
+        [switch]$FolderMode,
+        [string]$FolderPath = ''
     )
-
-    $isNew = -not $Profile
-    if ($isNew) {
-        $Profile = New-PSTermProfile
-        $settings = Import-PSTermSettings -Root $State.Root
-        $Profile.terminal.backspace = $settings.defaultBackspace
-        $Profile.terminal.encoding = $settings.defaultEncoding
-        $Profile.terminal.theme = $settings.theme
-        $Profile.terminal.fontFamily = $settings.fontFamily
-        $Profile.terminal.fontSize = $settings.fontSize
-        $Profile.terminal.scrollback = $settings.scrollback
-    }
 
     $theme = $State.Theme
     $scale = Get-PSTermScale -Control $State.Form
+    $settings = Import-PSTermSettings -Root $State.Root
+
+    $isNew = -not $Profile
+    $record = $null
+    if ($FolderMode) {
+        $record = Add-PSTermFolder -Store $State.Store -Path $FolderPath
+        $Profile = $record.defaults
+        $isNew = -not $Profile
+        if ($isNew) { $Profile = New-PSTermProfile -Name $FolderPath }
+    }
+    elseif ($isNew) {
+        $Profile = New-PSTermProfileInFolder -Store $State.Store -Folder $Folder
+        # Without folder defaults a new connection starts from the global defaults.
+        if (-not (Get-PSTermFolderDefaults -Store $State.Store -Path $Folder)) {
+            $Profile.terminal.backspace = $settings.defaultBackspace
+            $Profile.terminal.encoding = $settings.defaultEncoding
+            $Profile.terminal.theme = $settings.theme
+            $Profile.terminal.fontFamily = $settings.fontFamily
+            $Profile.terminal.fontSize = $settings.fontSize
+            $Profile.terminal.scrollback = $settings.scrollback
+        }
+    }
+    $originalName = [string]$Profile.name
+
+    $secretKey = if ($FolderMode) { "folder:$FolderPath" } else { "profile:$($Profile.id)" }
+    $existingSecret = if ($Profile.credentialKey) { Get-PSTermSecret -Root $State.Root -Key ([string]$Profile.credentialKey) } else { $null }
+
+    $tips = New-Object PSTerm.Render.ThemedToolTip
+    $tips.Apply((New-PSTermControlTheme -Theme $theme))
+    $script:DialogTips = $tips
 
     $dialog = New-Object PSTerm.Render.ThemedForm
-    $dialog.Text = if ($isNew) { 'New connection' } else { "Edit - $($Profile.name)" }
+    $dialog.Text = if ($FolderMode) { "Folder settings - $FolderPath" } elseif ($isNew) { 'New connection' } else { "Edit - $($Profile.name)" }
     $dialog.StartPosition = 'CenterParent'
     $dialog.FormBorderStyle = 'Sizable'
     $dialog.MinimizeBox = $false
     $dialog.MaximizeBox = $false
+    $dialog.ShowInTaskbar = $false
     $dialog.Font = New-PSTermFont
-    $dialog.Size = New-Object System.Drawing.Size([int](580 * $scale), [int](640 * $scale))
-    $dialog.MinimumSize = New-Object System.Drawing.Size([int](480 * $scale), [int](440 * $scale))
+    $dialog.Size = New-Object System.Drawing.Size([int](600 * $scale), [int](700 * $scale))
+    $dialog.MinimumSize = New-Object System.Drawing.Size([int](500 * $scale), [int](460 * $scale))
     $rowHeight = [int]($dialog.Font.Height * 1.85)
+
+    $folderHint = if ($FolderMode) { ' New connections created in this folder start with these settings.' } else { '' }
 
     # ---- general -------------------------------------------------------
     $general = New-PSTermFieldGrid
-    $nameBox   = Add-PSTermField $general 'Name'   (New-PSTermTextField $Profile.name) $theme
-    $folderBox = Add-PSTermField $general 'Folder' (New-PSTermComboField -Items (Get-PSTermFolders -Store $State.Store) -Value $Profile.folder -Editable) $theme
-    $typeBox   = Add-PSTermField $general 'Type'   (New-PSTermComboField -Items @('SSH', 'Telnet', 'Serial', 'Shell') -Value $Profile.type) $theme
+    $nameBox   = Add-PSTermField $general 'Name'   (New-PSTermTextField $Profile.name) $theme -Tip "What the connection is called in the list. Leave 'New connection' when you only enter an address: PSTerm then names it from DNS, or from the device's own prompt once it has connected."
+    $folderBox = Add-PSTermField $general 'Folder' (New-PSTermComboField -Items (Get-PSTermAllFolderPaths -Store $State.Store) -Value $Profile.folder -Editable) $theme -Tip 'The folder the connection is listed in. Type a new name to create one; use / for subfolders.'
+    $typeBox   = Add-PSTermField $general 'Type'   (New-PSTermComboField -Items @('SSH', 'Telnet', 'Serial', 'Shell') -Value $Profile.type) $theme -Tip "How to connect: SSH or Telnet over the network, Serial through a COM port, or Shell for a local program.$folderHint"
 
     # ---- per-transport panels ------------------------------------------
     $sshGrid = New-PSTermFieldGrid
-    $sshHost     = Add-PSTermField $sshGrid 'Host'          (New-PSTermTextField $Profile.ssh.host) $theme
-    $sshUser     = Add-PSTermField $sshGrid 'Username'      (New-PSTermTextField $Profile.ssh.user) $theme
-    $sshPort     = Add-PSTermField $sshGrid 'Port'          (New-PSTermTextField $Profile.ssh.port) $theme
-    $sshKey      = Add-PSTermField $sshGrid 'Key file'      (New-PSTermTextField $Profile.ssh.identityFile) $theme
-    $sshJump     = Add-PSTermField $sshGrid 'Jump host'     (New-PSTermTextField $Profile.ssh.proxyJump) $theme
-    $sshKeepAlive= Add-PSTermField $sshGrid 'Keep-alive (s)'(New-PSTermTextField $Profile.ssh.keepAliveSeconds) $theme
-    $sshAgent    = Add-PSTermField $sshGrid '' (New-PSTermCheckField 'Forward the SSH agent' ([bool]$Profile.ssh.forwardAgent)) $theme
-    $sshCompress = Add-PSTermField $sshGrid '' (New-PSTermCheckField 'Enable compression' ([bool]$Profile.ssh.compression)) $theme
-    $sshLegacy   = Add-PSTermField $sshGrid '' (New-PSTermCheckField 'Allow legacy ciphers and key exchange (older equipment)' ([bool]$Profile.ssh.allowLegacyAlgorithms)) $theme
+    $sshHost     = Add-PSTermField $sshGrid 'Host'          (New-PSTermTextField $Profile.ssh.host) $theme -Tip 'The device''s IP address or host name.'
+    $sshUser     = Add-PSTermField $sshGrid 'Username'      (New-PSTermTextField $Profile.ssh.user) $theme -Tip 'The account to log in as. If left empty PSTerm asks when you connect - it never silently uses your Windows user name.'
+    $sshPasswordPanel = New-PSTermPasswordField -Value ([string]$existingSecret)
+    $sshPassword = Add-PSTermField $sshGrid 'Password' $sshPasswordPanel $theme -Tip 'Typed automatically at the password prompt. Stored encrypted for your Windows account, never in the connection file. Leave empty to type it yourself.'
+    $sshPort     = Add-PSTermField $sshGrid 'Port'          (New-PSTermTextField $Profile.ssh.port) $theme -Tip 'The SSH port, normally 22.'
+    $sshKey      = Add-PSTermField $sshGrid 'Key file'      (New-PSTermTextField $Profile.ssh.identityFile) $theme -Tip 'Path to a private key to log in with instead of a password.'
+    $sshJump     = Add-PSTermField $sshGrid 'Jump host'     (New-PSTermTextField $Profile.ssh.proxyJump) $theme -Tip 'Reach the device through another SSH host, as user@host[:port].'
+    $sshKeepAlive= Add-PSTermField $sshGrid 'Keep-alive (s)'(New-PSTermTextField $Profile.ssh.keepAliveSeconds) $theme -Tip 'Send a keep-alive this often so idle sessions are not dropped. 0 turns it off.'
+    $sshAccept   = Add-PSTermField $sshGrid '' (New-PSTermCheckField 'Accept new host keys automatically' ([bool]$Profile.ssh.autoAcceptHostKey)) $theme -Tip "Trust a device's host key the first time without asking. A key that later CHANGES is still refused, because that is what a man-in-the-middle looks like."
+    $sshAgent    = Add-PSTermField $sshGrid '' (New-PSTermCheckField 'Forward the SSH agent' ([bool]$Profile.ssh.forwardAgent)) $theme -Tip 'Let the device use your SSH agent for onward connections.'
+    $sshCompress = Add-PSTermField $sshGrid '' (New-PSTermCheckField 'Enable compression' ([bool]$Profile.ssh.compression)) $theme -Tip 'Compress the connection. Helps on slow links, costs CPU on fast ones.'
+    $sshLegacy   = Add-PSTermField $sshGrid '' (New-PSTermCheckField 'Allow legacy ciphers and key exchange (older equipment)' ([bool]$Profile.ssh.allowLegacyAlgorithms)) $theme -Tip 'Older switches only offer algorithms that current OpenSSH disables. Turn this on for such a device.'
 
     $telnetGrid = New-PSTermFieldGrid
-    $telnetHost = Add-PSTermField $telnetGrid 'Host' (New-PSTermTextField $Profile.telnet.host) $theme
-    $telnetPort = Add-PSTermField $telnetGrid 'Port' (New-PSTermTextField $Profile.telnet.port) $theme
-    $telnetType = Add-PSTermField $telnetGrid 'Terminal type' (New-PSTermComboField -Items @('xterm-256color', 'xterm', 'vt220', 'vt100', 'ansi', 'linux') -Value $Profile.telnet.terminalType -Editable) $theme
-    $telnetNeg  = Add-PSTermField $telnetGrid '' (New-PSTermCheckField 'Negotiate options actively (recommended)' ([bool]$Profile.telnet.activeNegotiation)) $theme
-    $telnetBin  = Add-PSTermField $telnetGrid '' (New-PSTermCheckField 'Request 8-bit binary mode (needed for UTF-8)' ([bool]$Profile.telnet.binary)) $theme
-    $telnetKeep = Add-PSTermField $telnetGrid 'Keep-alive (s)' (New-PSTermTextField $Profile.telnet.keepAliveSeconds) $theme
+    $telnetHost = Add-PSTermField $telnetGrid 'Host' (New-PSTermTextField $Profile.telnet.host) $theme -Tip 'The device''s IP address or host name.'
+    $telnetPort = Add-PSTermField $telnetGrid 'Port' (New-PSTermTextField $Profile.telnet.port) $theme -Tip 'The Telnet port, normally 23.'
+    $telnetPasswordPanel = New-PSTermPasswordField -Value ([string]$existingSecret)
+    $telnetPassword = Add-PSTermField $telnetGrid 'Password' $telnetPasswordPanel $theme -Tip 'Typed automatically at the password prompt. Stored encrypted for your Windows account.'
+    $telnetType = Add-PSTermField $telnetGrid 'Terminal type' (New-PSTermComboField -Items @('xterm-256color', 'xterm', 'vt220', 'vt100', 'ansi', 'linux') -Value $Profile.telnet.terminalType -Editable) $theme -Tip 'The terminal type announced to the device.'
+    $telnetNeg  = Add-PSTermField $telnetGrid '' (New-PSTermCheckField 'Negotiate options actively (recommended)' ([bool]$Profile.telnet.activeNegotiation)) $theme -Tip 'Offer the standard Telnet options up front. Devices that skip this tend to echo wrongly or ignore the window size.'
+    $telnetBin  = Add-PSTermField $telnetGrid '' (New-PSTermCheckField 'Request 8-bit binary mode (needed for UTF-8)' ([bool]$Profile.telnet.binary)) $theme -Tip 'Ask for 8-bit clean transmission, needed for anything outside plain ASCII.'
+    $telnetKeep = Add-PSTermField $telnetGrid 'Keep-alive (s)' (New-PSTermTextField $Profile.telnet.keepAliveSeconds) $theme -Tip 'Send a no-op this often to hold idle sessions open. 0 turns it off.'
 
     $serialGrid = New-PSTermFieldGrid
     $serialPorts = @([PSTerm.Backends.SerialBackend]::GetPortNames())
-    $serialPort = Add-PSTermField $serialGrid 'COM port' (New-PSTermComboField -Items $serialPorts -Value $Profile.serial.portName -Editable) $theme
-    $serialBaud = Add-PSTermField $serialGrid 'Baud rate' (New-PSTermComboField -Items @('300','1200','2400','4800','9600','19200','38400','57600','115200','230400','460800','921600') -Value ([string]$Profile.serial.baudRate) -Editable) $theme
-    $serialData = Add-PSTermField $serialGrid 'Data bits' (New-PSTermComboField -Items @('5','6','7','8') -Value ([string]$Profile.serial.dataBits)) $theme
-    $serialParity = Add-PSTermField $serialGrid 'Parity' (New-PSTermComboField -Items ([enum]::GetNames([System.IO.Ports.Parity])) -Value ([string]$Profile.serial.parity)) $theme
-    $serialStop = Add-PSTermField $serialGrid 'Stop bits' (New-PSTermComboField -Items @('One','OnePointFive','Two') -Value ([string]$Profile.serial.stopBits)) $theme
-    $serialFlow = Add-PSTermField $serialGrid 'Flow control' (New-PSTermComboField -Items ([enum]::GetNames([System.IO.Ports.Handshake])) -Value ([string]$Profile.serial.handshake)) $theme
-    $serialDtr  = Add-PSTermField $serialGrid '' (New-PSTermCheckField 'Assert DTR (most USB console adapters need this)' ([bool]$Profile.serial.dtrEnable)) $theme
-    $serialRts  = Add-PSTermField $serialGrid '' (New-PSTermCheckField 'Assert RTS' ([bool]$Profile.serial.rtsEnable)) $theme
-    $serialReconnect = Add-PSTermField $serialGrid '' (New-PSTermCheckField 'Reopen the port automatically if the adapter is unplugged' ([bool]$Profile.serial.reconnect)) $theme
+    $serialPort = Add-PSTermField $serialGrid 'COM port' (New-PSTermComboField -Items $serialPorts -Value $Profile.serial.portName -Editable) $theme -Tip 'The COM port the console cable is on.'
+    $serialBaud = Add-PSTermField $serialGrid 'Baud rate' (New-PSTermComboField -Items @('300','1200','2400','4800','9600','19200','38400','57600','115200','230400','460800','921600') -Value ([string]$Profile.serial.baudRate) -Editable) $theme -Tip 'The line speed. Cisco consoles use 9600.'
+    $serialData = Add-PSTermField $serialGrid 'Data bits' (New-PSTermComboField -Items @('5','6','7','8') -Value ([string]$Profile.serial.dataBits)) $theme -Tip 'Almost always 8.'
+    $serialParity = Add-PSTermField $serialGrid 'Parity' (New-PSTermComboField -Items ([enum]::GetNames([System.IO.Ports.Parity])) -Value ([string]$Profile.serial.parity)) $theme -Tip 'Almost always None.'
+    $serialStop = Add-PSTermField $serialGrid 'Stop bits' (New-PSTermComboField -Items @('One','OnePointFive','Two') -Value ([string]$Profile.serial.stopBits)) $theme -Tip 'Almost always One.'
+    $serialFlow = Add-PSTermField $serialGrid 'Flow control' (New-PSTermComboField -Items ([enum]::GetNames([System.IO.Ports.Handshake])) -Value ([string]$Profile.serial.handshake)) $theme -Tip 'None for console cables.'
+    $serialDtr  = Add-PSTermField $serialGrid '' (New-PSTermCheckField 'Assert DTR (most USB console adapters need this)' ([bool]$Profile.serial.dtrEnable)) $theme -Tip 'Raise the DTR line. Many USB console adapters stay silent without it.'
+    $serialRts  = Add-PSTermField $serialGrid '' (New-PSTermCheckField 'Assert RTS' ([bool]$Profile.serial.rtsEnable)) $theme -Tip 'Raise the RTS line, which some devices require.'
+    $serialReconnect = Add-PSTermField $serialGrid '' (New-PSTermCheckField 'Reopen the port automatically if the adapter is unplugged' ([bool]$Profile.serial.reconnect)) $theme -Tip 'If the cable is pulled and plugged back in, carry on in the same tab.'
 
     $shellGrid = New-PSTermFieldGrid
-    $shellCmd = Add-PSTermField $shellGrid 'Command line' (New-PSTermTextField $Profile.shell.commandLine) $theme
-    $shellDir = Add-PSTermField $shellGrid 'Start in' (New-PSTermTextField $Profile.shell.workingDirectory) $theme
+    $shellCmd = Add-PSTermField $shellGrid 'Command line' (New-PSTermTextField $Profile.shell.commandLine) $theme -Tip 'The program to run, for example powershell.exe -NoLogo.'
+    $shellDir = Add-PSTermField $shellGrid 'Start in' (New-PSTermTextField $Profile.shell.workingDirectory) $theme -Tip 'The folder to start in. Empty means your home folder.'
 
     # ---- terminal ------------------------------------------------------
     $termGrid = New-PSTermFieldGrid
-    $termEncoding = Add-PSTermField $termGrid 'Encoding' (New-PSTermComboField -Items @('Utf8','Latin1','Ascii','Oem') -Value ([string]$Profile.terminal.encoding)) $theme
-    $termBackspace = Add-PSTermField $termGrid 'Backspace sends' (New-PSTermComboField -Items @('Delete','Backspace') -Value ([string]$Profile.terminal.backspace)) $theme
-    $termFunctionKeys = Add-PSTermField $termGrid 'Function keys' (New-PSTermComboField -Items @('Xterm','Vt220','LinuxConsole') -Value ([string]$Profile.terminal.functionKeys)) $theme
-    $termTheme = Add-PSTermField $termGrid 'Colours' (New-PSTermComboField -Items @('Dark','Light') -Value ([string]$Profile.terminal.theme)) $theme
-    $termFont = Add-PSTermField $termGrid 'Font' (New-PSTermComboField -Items (Get-PSTermAvailableMonospaceFonts) -Value ([string]$Profile.terminal.fontFamily) -Editable) $theme
-    $termFontSize = Add-PSTermField $termGrid 'Font size' (New-PSTermTextField $Profile.terminal.fontSize) $theme
-    $termScrollback = Add-PSTermField $termGrid 'Scrollback lines' (New-PSTermTextField $Profile.terminal.scrollback) $theme
-    $termAltEscape = Add-PSTermField $termGrid '' (New-PSTermCheckField 'Alt sends Escape (meta key)' ([bool]$Profile.terminal.altSendsEscape)) $theme
+    $termEncoding = Add-PSTermField $termGrid 'Encoding' (New-PSTermComboField -Items @('Utf8','Latin1','Ascii','Oem') -Value ([string]$Profile.terminal.encoding)) $theme -Tip 'How bytes from the device become text. Utf8 suits nearly everything; use Latin1 or Oem for older equipment that draws boxes.'
+    $termBackspace = Add-PSTermField $termGrid 'Backspace sends' (New-PSTermComboField -Items @('Delete','Backspace') -Value ([string]$Profile.terminal.backspace)) $theme -Tip 'The code the Backspace key sends. If it prints ^H or ~ on a device, switch it.'
+    $termFunctionKeys = Add-PSTermField $termGrid 'Function keys' (New-PSTermComboField -Items @('Xterm','Vt220','LinuxConsole') -Value ([string]$Profile.terminal.functionKeys)) $theme -Tip 'Which escape sequences F1-F12 send.'
+    $termTheme = Add-PSTermField $termGrid 'Colours' (New-PSTermComboField -Items @('Dark','Light') -Value ([string]$Profile.terminal.theme)) $theme -Tip 'The colour scheme of the terminal itself.'
+    $termFont = Add-PSTermField $termGrid 'Font' (New-PSTermComboField -Items (Get-PSTermAvailableMonospaceFonts) -Value ([string]$Profile.terminal.fontFamily) -Editable) $theme -Tip 'A fixed-width font for the terminal.'
+    $termFontSize = Add-PSTermField $termGrid 'Font size' (New-PSTermTextField $Profile.terminal.fontSize) $theme -Tip 'Font size in points.'
+    $termScrollback = Add-PSTermField $termGrid 'Scrollback lines' (New-PSTermTextField $Profile.terminal.scrollback) $theme -Tip 'How many lines are kept to scroll back through.'
+    $termAltEscape = Add-PSTermField $termGrid '' (New-PSTermCheckField 'Alt sends Escape (meta key)' ([bool]$Profile.terminal.altSendsEscape)) $theme -Tip 'Alt+key sends Escape then the key, which is what Emacs-style editing on a device expects.'
 
     $backspaceHint = New-PSTermLabel -Text "Tip: if Backspace prints ^H or ~ on a device, switch it to the other setting." -Theme $theme
     $backspaceHint.ForeColor = $theme.TextMuted
-    $backspaceHint.MaximumSize = New-Object System.Drawing.Size([int](480 * $scale), 0)
+    $backspaceHint.MaximumSize = New-Object System.Drawing.Size([int](500 * $scale), 0)
 
     # ---- logging -------------------------------------------------------
     $logGrid = New-PSTermFieldGrid
-    $logEnabled = Add-PSTermField $logGrid '' (New-PSTermCheckField 'Log this session to a file' ([bool]$Profile.logging.enabled)) $theme
-    $logPath = Add-PSTermField $logGrid 'File' (New-PSTermTextField $Profile.logging.pathTemplate) $theme
-    $logFormat = Add-PSTermField $logGrid 'Format' (New-PSTermComboField -Items @('PlainText','Timestamped','Raw') -Value ([string]$Profile.logging.format)) $theme
-    $logInput = Add-PSTermField $logGrid '' (New-PSTermCheckField 'Include what I type' ([bool]$Profile.logging.includeInput)) $theme
-    $logMask = Add-PSTermField $logGrid '' (New-PSTermCheckField 'Mask passwords' ([bool]$Profile.logging.maskPasswords)) $theme
-    $logAppend = Add-PSTermField $logGrid '' (New-PSTermCheckField 'Append rather than overwrite' ([bool]$Profile.logging.append)) $theme
-    $logRotate = Add-PSTermField $logGrid 'Roll over at (bytes, 0 = never)' (New-PSTermTextField $Profile.logging.maxBytes) $theme
+    $logEnabled = Add-PSTermField $logGrid '' (New-PSTermCheckField 'Log this session to a file' ([bool]$Profile.logging.enabled)) $theme -Tip 'Write everything the device shows to a file. The pager prompt (--More--) and the keys that answer it are left out.'
+    $logPath = Add-PSTermField $logGrid 'File' (New-PSTermTextField $Profile.logging.pathTemplate) $theme -Tip 'Where the log goes. {name}, {host}, {user}, {port}, {date}, {time} and {datetime} are filled in, so each device writes its own file.'
+    $logFormat = Add-PSTermField $logGrid 'Format' (New-PSTermComboField -Items @('PlainText','Timestamped','Raw') -Value ([string]$Profile.logging.format)) $theme -Tip 'PlainText is what you saw. Timestamped adds the time to each line. Raw keeps every byte, for replaying.'
+    $logInput = Add-PSTermField $logGrid '' (New-PSTermCheckField 'Include what I type' ([bool]$Profile.logging.includeInput)) $theme -Tip 'Also record your keystrokes. The device normally echoes them already.'
+    $logMask = Add-PSTermField $logGrid '' (New-PSTermCheckField 'Mask passwords' ([bool]$Profile.logging.maskPasswords)) $theme -Tip 'Replace what is typed after a password prompt with asterisks.'
+    $logAppend = Add-PSTermField $logGrid '' (New-PSTermCheckField 'Append rather than overwrite' ([bool]$Profile.logging.append)) $theme -Tip 'Add to an existing log file instead of starting it again.'
+    $logRotate = Add-PSTermField $logGrid 'Roll over at (bytes, 0 = never)' (New-PSTermTextField $Profile.logging.maxBytes) $theme -Tip 'Start a new log file once this size is reached. 0 never rolls over.'
 
     $logHint = New-PSTermLabel -Text 'Supports {name}, {host}, {user}, {port}, {date}, {time} and {datetime}, so each device can write its own dated file. Relative paths go under the PSTerm folder.' -Theme $theme
     $logHint.ForeColor = $theme.TextMuted
-    $logHint.MaximumSize = New-Object System.Drawing.Size([int](480 * $scale), 0)
+    $logHint.MaximumSize = New-Object System.Drawing.Size([int](500 * $scale), 0)
 
-    # ---- auto input ----------------------------------------------------
+    # ---- automation ----------------------------------------------------
     $autoGrid = New-PSTermFieldGrid
     $autoBox = New-Object System.Windows.Forms.TextBox
     $autoBox.Multiline = $true
     $autoBox.ScrollBars = 'Vertical'
     $autoBox.AcceptsReturn = $true
-    $autoBox.Height = [int](140 * $scale)
+    $autoBox.Height = [int](110 * $scale)
     $autoBox.Text = (@($Profile.autoInput) -join "`r`n")
-    [void](Add-PSTermField $autoGrid 'Send after connecting' $autoBox $theme)
+    [void](Add-PSTermField $autoGrid 'Send after connecting' $autoBox $theme -Tip 'Commands typed for you once connected, one per line, with a short pause between each. Do not put passwords here: use the Password field or a quick credential.')
 
     $autoHint = New-PSTermLabel -Text 'One command per line, sent with a short pause between each. Do not put passwords here: this file is not encrypted.' -Theme $theme
     $autoHint.ForeColor = $theme.Warning
-    $autoHint.MaximumSize = New-Object System.Drawing.Size([int](480 * $scale), 0)
+    $autoHint.MaximumSize = New-Object System.Drawing.Size([int](500 * $scale), 0)
+
+    $enableGrid = New-PSTermFieldGrid
+    $enableOn = Add-PSTermField $enableGrid '' (New-PSTermCheckField 'Enter privileged mode after login (Cisco "enable")' ([bool]$Profile.autoEnable.enabled)) $theme -Tip 'When the device shows its user prompt (ending in >), send the enable command and answer the password prompt with a quick credential.'
+    $enableCmd = Add-PSTermField $enableGrid 'Command' (New-PSTermTextField $Profile.autoEnable.command) $theme -Tip 'The command that enters privileged mode, normally enable.'
+    $enableDelay = Add-PSTermField $enableGrid 'Delay (ms)' (New-PSTermTextField $Profile.autoEnable.delayMs) $theme -Tip 'How long to wait after the prompt appears before sending the command. Raise it for slow devices.'
+    $credNames = @('(none)') + @(@($State.Store.credentials) | ForEach-Object { [string]$_.name })
+    $currentCred = Get-PSTermCredentialById -Store $State.Store -Id ([string]$Profile.autoEnable.credentialId)
+    $enableCred = Add-PSTermField $enableGrid 'Credential' (New-PSTermComboField -Items $credNames -Value $(if ($currentCred) { [string]$currentCred.name } else { '(none)' })) $theme -Tip 'The quick credential whose secret answers the enable password prompt. Manage them with Credentials on the toolbar.'
+    $enableUser = Add-PSTermField $enableGrid '' (New-PSTermCheckField 'The credential has a user name that is asked for first' ([bool]$Profile.autoEnable.useUsername)) $theme -Tip 'Tick this when the device asks for a user name before the enable password. Leave it off for the usual password-only enable.'
+    $manageCreds = New-Object System.Windows.Forms.Button
+    $manageCreds.Text = 'Manage credentials...'
+    $manageCreds.Height = $rowHeight
+    $manageCreds.Width = [int](170 * $scale)
+    $manageCreds.Anchor = 'Left'
+    $tips.SetTip($manageCreds, 'Add or change the saved credentials that auto-enable can use.')
+    [void](Add-PSTermField $enableGrid '' $manageCreds $theme)
+    $manageCreds.Dock = 'None'
+    $manageCreds.Add_Click({
+        Show-PSTermCredentialManager -State $State
+        $keep = [string]$enableCred.SelectedItem
+        $enableCred.Items.Clear()
+        foreach ($n in (@('(none)') + @(@($State.Store.credentials) | ForEach-Object { [string]$_.name }))) { [void]$enableCred.Items.Add($n) }
+        if ($keep -and $enableCred.Items.Contains($keep)) { $enableCred.SelectedItem = $keep } else { $enableCred.SelectedIndex = 0 }
+    }.GetNewClosure())
 
     # ---- assemble tabs --------------------------------------------------
     # The same owner-drawn strip the main window uses, for the same reason:
@@ -268,7 +351,7 @@ function Invoke-PSTermEditProfile {
         @{ Title = 'Connection'; Page = (New-PSTermDialogPage @($general, $sshGrid, $telnetGrid, $serialGrid, $shellGrid)) }
         @{ Title = 'Terminal';   Page = (New-PSTermDialogPage @($termGrid, $backspaceHint)) }
         @{ Title = 'Logging';    Page = (New-PSTermDialogPage @($logGrid, $logHint)) }
-        @{ Title = 'Automation'; Page = (New-PSTermDialogPage @($autoGrid, $autoHint)) }
+        @{ Title = 'Automation'; Page = (New-PSTermDialogPage @($autoGrid, $autoHint, $enableGrid)) }
     )
 
     foreach ($entry in $dialogPages) {
@@ -308,11 +391,13 @@ function Invoke-PSTermEditProfile {
     $cancelButton.Text = 'Cancel'
     $cancelButton.DialogResult = 'Cancel'
     $cancelButton.Width = [int](96 * $scale); $cancelButton.Height = $rowHeight
+    $tips.SetTip($cancelButton, 'Close without saving.')
 
     $okButton = New-Object System.Windows.Forms.Button
-    $okButton.Text = if ($isNew) { 'Create' } else { 'Save' }
+    $okButton.Text = if ($isNew -and -not $FolderMode) { 'Create' } else { 'Save' }
     $okButton.DialogResult = 'OK'
     $okButton.Width = [int](96 * $scale); $okButton.Height = $rowHeight
+    $tips.SetTip($okButton, 'Save these settings.')
 
     $buttonFlow.Controls.AddRange(@($okButton, $cancelButton))
     $dialog.AcceptButton = $okButton
@@ -321,8 +406,17 @@ function Invoke-PSTermEditProfile {
     $dialog.Controls.Add($pageHost)
     $dialog.Controls.Add($buttonRow)
 
-    foreach ($grid in @($general, $sshGrid, $telnetGrid, $serialGrid, $shellGrid, $termGrid, $logGrid, $autoGrid)) {
+    foreach ($grid in @($general, $sshGrid, $telnetGrid, $serialGrid, $shellGrid, $termGrid, $logGrid, $autoGrid, $enableGrid)) {
         $grid.ResumeLayout($false)
+    }
+
+    # A folder's settings are defaults, not a connection: there is nothing to name or
+    # to point at, so those fields are not shown.
+    if ($FolderMode) {
+        foreach ($pair in @(@($general, $nameBox), @($general, $folderBox), @($sshGrid, $sshHost), @($telnetGrid, $telnetHost),
+                            @($serialGrid, $serialPort), @($shellGrid, $shellCmd))) {
+            Hide-PSTermField -Grid $pair[0] -Control $pair[1]
+        }
     }
 
     # Show only the panel for the selected transport.
@@ -337,20 +431,17 @@ function Invoke-PSTermEditProfile {
     & $updateVisibility
 
     Set-PSTermFormTheme -Control $dialog -Theme $theme
-    $dialog.Add_Shown({ Set-PSTermTitleBarTheme -Form $dialog -Dark ($theme.Mode -eq 'Dark') }.GetNewClosure())
 
-    if ($dialog.ShowDialog($State.Form) -ne [System.Windows.Forms.DialogResult]::OK) {
+    $result = $dialog.ShowDialog($State.Form)
+    $script:DialogTips = $null
+    if ($result -ne [System.Windows.Forms.DialogResult]::OK) {
+        $tips.Dispose()
         $dialog.Dispose()
-        return
+        return $null
     }
 
     # ---- read back -------------------------------------------------------
-    $name = $nameBox.Text.Trim()
-    if (-not $name) { $name = 'Unnamed' }
-
-    $Profile.name   = $name
-    $Profile.folder = $folderBox.Text.Trim()
-    $Profile.type   = [string]$typeBox.SelectedItem
+    $Profile.type = [string]$typeBox.SelectedItem
 
     $Profile.ssh.host = $sshHost.Text.Trim()
     $Profile.ssh.user = $sshUser.Text.Trim()
@@ -358,6 +449,7 @@ function Invoke-PSTermEditProfile {
     $Profile.ssh.identityFile = $sshKey.Text.Trim()
     $Profile.ssh.proxyJump = $sshJump.Text.Trim()
     $Profile.ssh.keepAliveSeconds = ConvertTo-PSTermInt $sshKeepAlive.Text 30
+    $Profile.ssh.autoAcceptHostKey = $sshAccept.Checked
     $Profile.ssh.forwardAgent = $sshAgent.Checked
     $Profile.ssh.compression = $sshCompress.Checked
     $Profile.ssh.allowLegacyAlgorithms = $sshLegacy.Checked
@@ -379,7 +471,9 @@ function Invoke-PSTermEditProfile {
     $Profile.serial.rtsEnable = $serialRts.Checked
     $Profile.serial.reconnect = $serialReconnect.Checked
 
-    $Profile.shell.commandLine = $shellCmd.Text.Trim()
+    if (-not $FolderMode) {
+        $Profile.shell.commandLine = $shellCmd.Text.Trim()
+    }
     $Profile.shell.workingDirectory = $shellDir.Text.Trim()
 
     $Profile.terminal.encoding = [string]$termEncoding.SelectedItem
@@ -402,24 +496,75 @@ function Invoke-PSTermEditProfile {
 
     $Profile.autoInput = @($autoBox.Text -split "`r?`n" | Where-Object { $_.Trim() })
 
+    $Profile.autoEnable.enabled = $enableOn.Checked
+    $Profile.autoEnable.command = $(if ($enableCmd.Text.Trim()) { $enableCmd.Text.Trim() } else { 'enable' })
+    $Profile.autoEnable.delayMs = ConvertTo-PSTermInt $enableDelay.Text 500
+    $chosen = [string]$enableCred.SelectedItem
+    $credential = @($State.Store.credentials) | Where-Object { $_.name -eq $chosen } | Select-Object -First 1
+    $Profile.autoEnable.credentialId = $(if ($credential) { [string]$credential.id } else { '' })
+    $Profile.autoEnable.useUsername = $enableUser.Checked
+
+    # The password the visible panel holds. Both panels start with the same value, so
+    # whichever type is chosen supplies it.
+    $panel = if ($Profile.type -eq 'Telnet') { $telnetPasswordPanel } else { $sshPasswordPanel }
+    $secret = [string]$panel.Tag.Text
+    if ($secret) {
+        [void](Set-PSTermSecret -Root $State.Root -Key $secretKey -Value $secret)
+        $Profile.credentialKey = $secretKey
+    }
+    elseif ($Profile.credentialKey) {
+        Remove-PSTermSecret -Root $State.Root -Key ([string]$Profile.credentialKey)
+        $Profile.credentialKey = ''
+    }
+
+    if ($FolderMode) {
+        $record.defaults = $Profile
+        Save-PSTermProfiles -Root $State.Root -Store $State.Store
+        $tips.Dispose(); $dialog.Dispose()
+        Set-PSTermStatusMessage -State $State -Message "Saved default settings for '$FolderPath'."
+        return $Profile
+    }
+
+    $name = $nameBox.Text.Trim()
+    $hostText = switch ($Profile.type) { 'SSH' { $Profile.ssh.host } 'Telnet' { $Profile.telnet.host } 'Serial' { $Profile.serial.portName } default { '' } }
+    $Profile.folder = $folderBox.Text.Trim()
+    if ($Profile.folder) { [void](Add-PSTermFolder -Store $State.Store -Path $Profile.folder) }
+
+    if (-not $name -or ($isNew -and $name -eq 'New connection')) {
+        if ($hostText) {
+            # Only an address needs looking up; a host name already says what it is.
+            $name = $hostText
+            $Profile.autoName = [bool]([PSTerm.Automation.NameLookup]::LooksLikeAddress($hostText))
+        }
+        else { $name = 'New connection' }
+    }
+    elseif ($name -ne $originalName) { $Profile.autoName = $false }
+    $Profile.name = $name
+
+    $tips.Dispose()
     $dialog.Dispose()
 
-    Set-PSTermProfile -Store $State.Store -Profile $Profile | Out-Null
+    [void](Set-PSTermProfile -Store $State.Store -Profile $Profile)
     Save-PSTermProfiles -Root $State.Root -Store $State.Store
     Update-PSTermTree -State $State
     Set-PSTermStatusMessage -State $State -Message "Saved '$name'."
+    if ($Profile.autoName) { Register-PSTermAutoName -State $State -Profile $Profile }
+    $Profile
 }
 
 function Invoke-PSTermDeleteProfile {
-    param([Parameter(Mandatory)]$State)
+    param([Parameter(Mandatory)]$State, [string]$Id = '')
 
-    $node = $State.Tree.SelectedNode
-    if (-not $node -or -not $node.Tag) {
-        Set-PSTermStatusMessage -State $State -Message 'Select a connection to delete.' -Level Warning
-        return
+    if (-not $Id) {
+        $info = Get-PSTermNodeInfo -Node $State.Tree.SelectedNode
+        if (-not $info -or $info.Kind -ne 'p') {
+            Set-PSTermStatusMessage -State $State -Message 'Select a connection to delete.' -Level Warning
+            return
+        }
+        $Id = $info.Value
     }
 
-    $profile = Get-PSTermProfileById -Store $State.Store -Id ([string]$node.Tag)
+    $profile = Get-PSTermProfileById -Store $State.Store -Id $Id
     if (-not $profile) { return }
 
     $answer = Show-PSTermMessage -Theme $State.Theme -Owner $State.Form `
@@ -432,6 +577,7 @@ function Invoke-PSTermDeleteProfile {
     }
 
     Remove-PSTermProfile -Store $State.Store -Id ([string]$profile.id) | Out-Null
+    Set-PSTermPinned -Store $State.Store -Id ([string]$profile.id) -Pinned $false
     Save-PSTermProfiles -Root $State.Root -Store $State.Store
     Update-PSTermTree -State $State
     Set-PSTermStatusMessage -State $State -Message "Deleted '$($profile.name)'."
@@ -460,7 +606,14 @@ function Show-PSTermCommandPalette {
     function Add-Command { param([string]$Title, [string]$Hint, [scriptblock]$Action)
         $commands.Add([pscustomobject]@{ Title = $Title; Hint = $Hint; Action = $Action }) }
 
-    Add-Command 'New connection...'      'Create a saved profile'      { Invoke-PSTermEditProfile -State $State -Profile $null }.GetNewClosure()
+    Add-Command 'New connection...'      'Create a saved profile'      { Invoke-PSTermNewConnection -State $State }.GetNewClosure()
+    Add-Command 'New folder...'          'Group connections'           { Invoke-PSTermNewFolder -State $State -Parent '' }.GetNewClosure()
+    Add-Command 'Quick credentials...'   'Saved enable and login secrets' { Show-PSTermCredentialManager -State $State }.GetNewClosure()
+    Add-Command 'Import from CSV...'     'e.g. a NetBox export'        { Invoke-PSTermImportCsv -State $State }.GetNewClosure()
+    Add-Command 'Import PSTerm session file...' '.psterm'             { Invoke-PSTermImportSessions -State $State }.GetNewClosure()
+    Add-Command 'Export all connections...' '.psterm'                 { Invoke-PSTermExportSessions -State $State -Scope All }.GetNewClosure()
+    Add-Command 'Toggle session list'    'Ctrl+B'                      { Set-PSTermSidebar -State $State -Toggle }.GetNewClosure()
+    Add-Command 'Settings...'            'Default user, ports'         { Show-PSTermSettings -State $State }.GetNewClosure()
     Add-Command 'Close tab'              'Ctrl+Shift+W' { Close-PSTermTab -State $State }.GetNewClosure()
     Add-Command 'Reconnect tab'          'Ctrl+Shift+R' { Restart-PSTermTab -State $State }.GetNewClosure()
     Add-Command 'Clear scrollback'       'Ctrl+Shift+L' { $t = Get-PSTermActiveTab -State $State; if ($t) { $t.Control.ClearScrollback() } }.GetNewClosure()
@@ -765,10 +918,17 @@ function Show-PSTermMenu {
 
     [void](Add-MenuItem 'Command palette   (Ctrl+Shift+P)' { Show-PSTermCommandPalette -State $State }.GetNewClosure())
     [void]$menu.Items.Add('-')
-    [void](Add-MenuItem 'New connection...' { Invoke-PSTermEditProfile -State $State -Profile $null }.GetNewClosure())
+    [void](Add-MenuItem 'New connection...' { Invoke-PSTermNewConnection -State $State }.GetNewClosure())
+    [void](Add-MenuItem 'New folder...' { Invoke-PSTermNewFolder -State $State -Parent '' }.GetNewClosure())
+    [void](Add-MenuItem 'Quick credentials...' { Show-PSTermCredentialManager -State $State }.GetNewClosure())
+    [void]$menu.Items.Add('-')
+    [void](Add-MenuItem 'Import from CSV...' { Invoke-PSTermImportCsv -State $State }.GetNewClosure())
+    [void](Add-MenuItem 'Import PSTerm session file...' { Invoke-PSTermImportSessions -State $State }.GetNewClosure())
     [void](Add-MenuItem 'Import PuTTY sessions' { Invoke-PSTermImportPutty -State $State }.GetNewClosure())
     [void](Add-MenuItem 'Import ssh_config hosts' { Invoke-PSTermImportSshConfig -State $State }.GetNewClosure())
+    [void](Add-MenuItem 'Export all connections...' { Invoke-PSTermExportSessions -State $State -Scope All }.GetNewClosure())
     [void]$menu.Items.Add('-')
+    [void](Add-MenuItem 'Settings...' { Show-PSTermSettings -State $State }.GetNewClosure())
     [void](Add-MenuItem 'Toggle theme' { Invoke-PSTermToggleTheme -State $State }.GetNewClosure())
     [void](Add-MenuItem 'Open the PSTerm folder' { Start-Process explorer.exe $State.Root }.GetNewClosure())
     [void]$menu.Items.Add('-')
@@ -882,15 +1042,7 @@ function Merge-PSTermImported {
     #>
     param($State, $Profiles)
 
-    $added = 0
-    foreach ($profile in $Profiles) {
-        $duplicate = @($State.Store.profiles) | Where-Object {
-            $_.name -eq $profile.name -and $_.folder -eq $profile.folder
-        }
-        if ($duplicate) { continue }
-        Set-PSTermProfile -Store $State.Store -Profile $profile | Out-Null
-        $added++
-    }
+    $added = Merge-PSTermImportedSessions -Store $State.Store -Profiles $Profiles
 
     if ($added -gt 0) {
         Save-PSTermProfiles -Root $State.Root -Store $State.Store
@@ -925,6 +1077,8 @@ Keyboard
   Ctrl+Shift+1..9 Go to tab
   Ctrl+Shift+C/V  Copy and paste
   Shift+PgUp/PgDn Scroll back
+  Ctrl+B          Show or hide the session list
+  Right-click     Copy the selection, or paste
 "@
 
     [void](Show-PSTermMessage -Theme $State.Theme -Owner $State.Form `

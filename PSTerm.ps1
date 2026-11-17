@@ -107,9 +107,11 @@ catch {
 . (Join-Path $Root 'src\Settings.ps1')
 . (Join-Path $Root 'src\Secrets.ps1')
 . (Join-Path $Root 'src\Profiles.ps1')
+. (Join-Path $Root 'src\Store.ps1')
 . (Join-Path $Root 'src\Connect.ps1')
 . (Join-Path $Root 'src\Ui\Theme.ps1')
 . (Join-Path $Root 'src\Ui\Dialogs.ps1')
+. (Join-Path $Root 'src\Ui\Tools.ps1')
 . (Join-Path $Root 'src\Ui\MainWindow.ps1')
 
 # -----------------------------------------------------------------------------

@@ -25,6 +25,8 @@ $suites = @(
     @{ Name = 'Core';        Path = Join-Path $PSScriptRoot 'Run-Tests.ps1' }
     @{ Name = 'Profiles';    Path = Join-Path $PSScriptRoot 'Run-ProfileTests.ps1' }
     @{ Name = 'Integration'; Path = Join-Path $PSScriptRoot 'Run-IntegrationTests.ps1' }
+    # Builds and drives the real window, so it needs a desktop and an STA thread.
+    @{ Name = 'Window';      Path = Join-Path $PSScriptRoot 'Run-UiTests.ps1'; Sta = $true }
 )
 
 function Get-Hosts {
@@ -54,7 +56,9 @@ foreach ($h in $hosts) {
 
     foreach ($suite in $suites) {
         $ran++
-        & $h.Exe -NoProfile -ExecutionPolicy Bypass -File $suite.Path | Out-Null
+        $hostArgs = @('-NoProfile', '-ExecutionPolicy', 'Bypass')
+        if ($suite.ContainsKey('Sta')) { $hostArgs += '-STA' }
+        & $h.Exe @hostArgs -File $suite.Path | Out-Null
         $code = $LASTEXITCODE
 
         if ($code -eq 0) {
@@ -64,7 +68,7 @@ foreach ($h in $hosts) {
             $failed++
             Write-Host ("  {0,-14} FAIL  (exit {1})" -f $suite.Name, $code) -ForegroundColor Red
             # Re-run so the actual failures are visible, rather than a bare code.
-            & $h.Exe -NoProfile -ExecutionPolicy Bypass -File $suite.Path 2>&1 |
+            & $h.Exe @hostArgs -File $suite.Path 2>&1 |
                 Select-String -Pattern 'FAIL' | ForEach-Object { Write-Host "      $_" -ForegroundColor Red }
         }
     }

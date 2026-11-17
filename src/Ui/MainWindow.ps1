@@ -1,6 +1,6 @@
 <#
 .SYNOPSIS
-    The PSTerm main window: session tree, tabs, quick connect and command palette.
+    The PSTerm main window: toolbar, session tree, tabs, quick connect and command palette.
 
 .DESCRIPTION
     Layout is entirely docking and TableLayoutPanel, with sizes scaled from the
@@ -13,9 +13,23 @@
 
 Set-StrictMode -Version Latest
 
+# Colours a tab can be marked with.
+$script:PSTermMarkColours = [ordered]@{
+    Red    = [System.Drawing.Color]::FromArgb(232, 78, 78)
+    Orange = [System.Drawing.Color]::FromArgb(240, 154, 56)
+    Yellow = [System.Drawing.Color]::FromArgb(232, 202, 64)
+    Green  = [System.Drawing.Color]::FromArgb(86, 190, 104)
+    Blue   = [System.Drawing.Color]::FromArgb(74, 144, 236)
+    Purple = [System.Drawing.Color]::FromArgb(164, 108, 222)
+    Grey   = [System.Drawing.Color]::FromArgb(142, 150, 164)
+}
+
 function New-PSTermMainWindow {
     [CmdletBinding()]
     param([Parameter(Mandatory)][string]$Root)
+
+    # Credentials are protected with DPAPI, which PowerShell 5.1 has to be told to load.
+    [void](Test-PSTermDpapiAvailable)
 
     $state = [pscustomobject]@{
         Root        = $Root
@@ -27,21 +41,38 @@ function New-PSTermMainWindow {
     # anyway, so this is also the more accurate type.
         Tabs        = (New-Object System.Collections.Generic.List[psobject])
         Form        = $null
+        Ribbon      = $null
         TabStrip    = $null
         TabHost     = $null
+        Split       = $null
         Tree        = $null
         SearchBox   = $null
         QuickBox    = $null
         TreeScroll  = $null
         TreeHost    = $null
+        SidebarButton = $null
         Status      = $null
         StatusLeft  = $null
         StatusRight = $null
         Palette     = $null
+        Tips        = $null
+        # Folders the operator has folded; kept across rebuilds of the tree.
+        Collapsed   = @{}
+        TreeBuilding = $false
+        # Connections waiting for a reverse-DNS answer.
+        Lookups     = (New-Object System.Collections.Generic.List[psobject])
+        MainTimer   = $null
+        Ports       = $null
+        PortsVersion = -1
+        KnownPorts  = @{}
+        PortsReady  = $false
+        PendingSidebarWidth = 0
+        DetectedPorts = @()
     }
 
     $settings = Import-PSTermSettings -Root $Root
     $state.Theme = New-PSTermChromeTheme -Mode $settings.theme
+    Set-PSTermAppChrome -Theme $state.Theme -Root $Root
 
     # ---------------------------------------------------------------- form ---
 
@@ -61,34 +92,43 @@ function New-PSTermMainWindow {
     $form.KeyPreview = $true
     $state.Form = $form
 
-    $iconPath = Join-Path $Root 'src\icon.ico'
-    if (Test-Path -LiteralPath $iconPath) {
-        try { $form.Icon = New-Object System.Drawing.Icon($iconPath) } catch { }
-    }
-
     $scale = Get-PSTermScale -Control $form
-    $form.MinimumSize = New-Object System.Drawing.Size([int](760 * $scale), [int](480 * $scale))
-    $form.Size = New-Object System.Drawing.Size([int](1100 * $scale), [int](700 * $scale))
+    $form.MinimumSize = New-Object System.Drawing.Size([int](780 * $scale), [int](520 * $scale))
+    $form.Size = New-Object System.Drawing.Size([int](1180 * $scale), [int](760 * $scale))
 
-    # Row height for anything that sits beside a text field, so the top bar and
-    # the buttons in it line up regardless of the system text size.
+    $tips = New-Object PSTerm.Render.ThemedToolTip
+    $tips.Apply((New-PSTermControlTheme -Theme $state.Theme))
+    $state.Tips = $tips
+
+    # One height for every control that sits in a row beside a button, so the
+    # quick-connect bar, the search box and the buttons line up exactly.
     $rowHeight = [int]($form.Font.Height * 1.85)
 
     # ------------------------------------------------------------- top bar ---
 
-    # The bar is sized from the font, and its children are anchored left/right
-    # rather than docked, so the row centres them vertically. Docking a
-    # single-line TextBox into a taller row is what left it looking clipped.
     $padY = [int](6 * $scale)
     $topBar = New-Object PSTerm.Render.ThemedPanel
     $topBar.Dock = 'Top'
     $topBar.Height = $rowHeight + ($padY * 2)
     $topBar.Padding = New-Object System.Windows.Forms.Padding([int](8 * $scale), $padY, [int](8 * $scale), $padY)
 
-    $quickBox = New-Object System.Windows.Forms.TextBox
-    $quickBox.Anchor = 'Left, Right'
-    $quickBox.Font = New-PSTermFont
-    $quickBox.Margin = New-Object System.Windows.Forms.Padding(0)
+    # The sessions panel switch. The glyphs are the left and right chevrons, so it
+    # reads as "fold the panel away" / "bring it back".
+    $sidebarButton = New-Object System.Windows.Forms.Button
+    $sidebarButton.Dock = 'Fill'
+    $sidebarButton.Margin = New-Object System.Windows.Forms.Padding(0, 0, [int](6 * $scale), 0)
+    $sidebarButton.TabStop = $false
+    $iconFamily = [PSTerm.Render.IconFont]::Family
+    if ($iconFamily) {
+        $sidebarButton.Font = New-Object System.Drawing.Font($iconFamily, [float]($form.Font.SizeInPoints * 1.05))
+    }
+    $state.SidebarButton = $sidebarButton
+
+    $quickFrame = New-Object PSTerm.Render.FieldFrame
+    $quickFrame.Dock = 'Fill'
+    $quickFrame.Font = New-PSTermFont
+    $quickFrame.Margin = New-Object System.Windows.Forms.Padding(0)
+    $quickBox = $quickFrame.Input
     $state.QuickBox = $quickBox
 
     # A placeholder beats a label here: the bar explains itself and costs no width.
@@ -97,28 +137,64 @@ function New-PSTermMainWindow {
 
     $connectButton = New-Object System.Windows.Forms.Button
     $connectButton.Text = 'Connect'
-    $connectButton.Anchor = 'Left, Right'
-    $connectButton.Height = $rowHeight
+    $connectButton.Dock = 'Fill'
     $connectButton.Margin = New-Object System.Windows.Forms.Padding([int](6 * $scale), 0, 0, 0)
 
     $menuButton = New-Object System.Windows.Forms.Button
     $menuButton.Text = 'Menu'
-    $menuButton.Anchor = 'Left, Right'
-    $menuButton.Height = $rowHeight
+    $menuButton.Dock = 'Fill'
     $menuButton.Margin = New-Object System.Windows.Forms.Padding([int](6 * $scale), 0, 0, 0)
 
     $topLayout = New-Object System.Windows.Forms.TableLayoutPanel
     $topLayout.Dock = 'Fill'
-    $topLayout.ColumnCount = 3
+    $topLayout.ColumnCount = 4
     $topLayout.RowCount = 1
     [void]$topLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Percent', 100)))
+    [void]$topLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', [int](42 * $scale))))
     [void]$topLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Percent', 100)))
     [void]$topLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', [int](96 * $scale))))
     [void]$topLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', [int](76 * $scale))))
-    $topLayout.Controls.Add($quickBox, 0, 0)
-    $topLayout.Controls.Add($connectButton, 1, 0)
-    $topLayout.Controls.Add($menuButton, 2, 0)
+    $topLayout.Controls.Add($sidebarButton, 0, 0)
+    $topLayout.Controls.Add($quickFrame, 1, 0)
+    $topLayout.Controls.Add($connectButton, 2, 0)
+    $topLayout.Controls.Add($menuButton, 3, 0)
     $topBar.Controls.Add($topLayout)
+
+    $tips.SetTip($sidebarButton, 'Hide or show the session list (Ctrl+B).')
+    $tips.SetTip($quickBox, 'Type where to connect and press Enter: user@host, host:2222, telnet host, COM3:115200, a saved connection name, or cmd.')
+    $tips.SetTip($connectButton, 'Connect to what is typed in the box (Enter).')
+    $tips.SetTip($menuButton, 'Import and export connections, credentials, settings and the About box.')
+
+    # -------------------------------------------------------------- toolbar --
+
+    $ribbon = New-Object PSTerm.Render.RibbonBar
+    $ribbon.Font = New-PSTermFont
+    $ribbon.Height = $ribbon.PreferredBarHeight()
+    $state.Ribbon = $ribbon
+
+    # Segoe MDL2 / Fluent glyph codes; the second string is what shows if no icon
+    # font is installed.
+    [void]$ribbon.Add('Connection', 'new',       'New',       ([string][char]0xE710), '+', 'New connection. Opens the connection editor (Ctrl+Shift+T types a destination instead).')
+    [void]$ribbon.Add('Connection', 'reconnect', 'Reconnect', ([string][char]0xE72C), 'R', 'Close this session and connect again with the same settings (Ctrl+Shift+R).')
+    [void]$ribbon.Add('Connection', 'duplicate', 'Duplicate', ([string][char]0xE8A7), 'D', 'Open another session to the same device in a new tab.')
+    [void]$ribbon.Add('Connection', 'close',     'Close',     ([string][char]0xE711), 'X', 'Close this tab (Ctrl+Shift+W).')
+    [void]$ribbon.Add('Edit',       'copy',      'Copy',      ([string][char]0xE8C8), 'C', 'Copy the selected text. Selecting text copies it already; right-click copies too.')
+    [void]$ribbon.Add('Edit',       'paste',     'Paste',     ([string][char]0xE77F), 'P', 'Paste the clipboard into the session (Ctrl+Shift+V, or right-click).')
+    [void]$ribbon.Add('Edit',       'selectall', 'Select all', ([string][char]0xE8B3), 'A', 'Select everything in the terminal, scrollback included.')
+    [void]$ribbon.Add('Terminal',   'find',      'Find',      ([string][char]0xE721), 'F', 'Search the scrollback (Ctrl+Shift+F).')
+    [void]$ribbon.Add('Terminal',   'clear',     'Clear',     ([string][char]0xE75C), 'C', 'Clear the scrollback (Ctrl+Shift+L).')
+    [void]$ribbon.Add('Terminal',   'reset',     'Reset',     ([string][char]0xE895), 'R', 'Reset the terminal: clear the screen, the scrollback and any stuck modes or colours.')
+    [void]$ribbon.Add('Terminal',   'break',     'Break',     ([string][char]0xE7BA), 'B', 'Send a serial break (serial connections only). Used to interrupt a boot or reach a ROM monitor.')
+    $credItem = $ribbon.Add('Automation', 'creds', 'Credentials', ([string][char]0xE192), 'K', 'Quick credentials: send a saved user name or password to the terminal, for example an enable password.')
+    $credItem.DropDown = $true
+    $importItem = $ribbon.Add('Sessions', 'import', 'Import', ([string][char]0xE896), 'I', 'Import connections from a CSV file, a PSTerm session file, PuTTY or ssh_config.')
+    $importItem.DropDown = $true
+    $exportItem = $ribbon.Add('Sessions', 'export', 'Export', ([string][char]0xE898), 'E', 'Export connections to a PSTerm session file to back them up or share them. Passwords are never included.')
+    $exportItem.DropDown = $true
+    $sideItem = $ribbon.Add('View', 'sidebar', 'Sessions', ([string][char]0xE700), 'S', 'Show or hide the session list (Ctrl+B).')
+    $sideItem.Toggle = $true
+    $sideItem.Checked = [bool]$settings.sidebarVisible
+    [void]$ribbon.Add('View', 'theme', 'Theme', ([string][char]0xE790), 'T', 'Switch between the dark and the light interface.')
 
     # -------------------------------------------------------------- splitter -
 
@@ -126,6 +202,7 @@ function New-PSTermMainWindow {
     $split.Dock = 'Fill'
     $split.SplitterWidth = [Math]::Max(4, [int](4 * $scale))
     $split.FixedPanel = 'Panel1'
+    $state.Split = $split
 
     # ------------------------------------------------------- session tree ----
 
@@ -134,16 +211,20 @@ function New-PSTermMainWindow {
 
     $searchHost = New-Object PSTerm.Render.ThemedPanel
     $searchHost.Dock = 'Top'
-    $searchHost.Height = $rowHeight + [int](10 * $scale)
-    $searchHost.Padding = New-Object System.Windows.Forms.Padding([int](6 * $scale), [int](5 * $scale), [int](6 * $scale), [int](5 * $scale))
+    # The same height as the quick-connect bar and the buttons: one row height, with
+    # the padding counted on both sides so no rounding can make them differ.
+    $searchPad = [int](6 * $scale)
+    $searchHost.Height = $rowHeight + ($searchPad * 2)
+    $searchHost.Padding = New-Object System.Windows.Forms.Padding($searchPad)
 
-    $searchBox = New-Object System.Windows.Forms.TextBox
-    $searchBox.Dock = 'Fill'
-    $searchBox.Font = New-PSTermFont
-    $searchBox.Margin = New-Object System.Windows.Forms.Padding(0)
+    $searchFrame = New-Object PSTerm.Render.FieldFrame
+    $searchFrame.Dock = 'Fill'
+    $searchFrame.Font = New-PSTermFont
+    $searchBox = $searchFrame.Input
     $state.SearchBox = $searchBox
     Set-PSTermPlaceholder -TextBox $searchBox -Theme $state.Theme -Text 'Search sessions'
-    $searchHost.Controls.Add($searchBox)
+    $searchHost.Controls.Add($searchFrame)
+    $tips.SetTip($searchBox, 'Filter the list by name, address or folder.')
 
     # ThemedTreeView: TreeView paints its selection bar, expander glyphs and
     # scroll bars with the system visual style and ignores BackColor.
@@ -165,23 +246,36 @@ function New-PSTermMainWindow {
 
     $treeHost.Controls.Add($tree)
     $treeHost.Controls.Add($treeScroll)
+    # In front of the tree: the tree is deliberately wider than its panel so its own
+    # (unthemeable) scroll bar falls outside, and this one has to cover the seam.
+    $treeScroll.BringToFront()
 
-    $treeButtons = New-Object System.Windows.Forms.FlowLayoutPanel
+    # Five equal columns, so the row fits however wide the panel is dragged.
+    $treeButtons = New-Object System.Windows.Forms.TableLayoutPanel
     $treeButtons.Dock = 'Bottom'
-    $treeButtons.Height = $rowHeight + [int](10 * $scale)
-    $treeButtons.FlowDirection = 'LeftToRight'
-    $treeButtons.Padding = New-Object System.Windows.Forms.Padding([int](6 * $scale), [int](5 * $scale), 0, 0)
+    $treeButtons.Height = $rowHeight + [int](14 * $scale)
+    $treeButtons.ColumnCount = 5
+    $treeButtons.RowCount = 1
+    $treeButtons.Padding = New-Object System.Windows.Forms.Padding([int](6 * $scale), [int](6 * $scale), [int](6 * $scale), [int](6 * $scale))
+    for ($i = 0; $i -lt 5; $i++) { [void]$treeButtons.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Percent', 20))) }
+    [void]$treeButtons.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Percent', 100)))
 
-    $newButton = New-Object System.Windows.Forms.Button
-    $newButton.Text = 'New'
-    $newButton.Width = [int](62 * $scale); $newButton.Height = $rowHeight
-    $editButton = New-Object System.Windows.Forms.Button
-    $editButton.Text = 'Edit'
-    $editButton.Width = [int](62 * $scale); $editButton.Height = $rowHeight
-    $deleteButton = New-Object System.Windows.Forms.Button
-    $deleteButton.Text = 'Delete'
-    $deleteButton.Width = [int](70 * $scale); $deleteButton.Height = $rowHeight
-    $treeButtons.Controls.AddRange(@($newButton, $editButton, $deleteButton))
+    $buttons = @()
+    foreach ($caption in 'New', 'Folder', 'Edit', 'Pin', 'Delete') {
+        $b = New-Object System.Windows.Forms.Button
+        $b.Text = $caption
+        $b.Dock = 'Fill'
+        $b.Margin = New-Object System.Windows.Forms.Padding(0, 0, [int](4 * $scale), 0)
+        $buttons += $b
+    }
+    $newButton, $folderButton, $editButton, $pinButton, $deleteButton = $buttons
+    for ($i = 0; $i -lt 5; $i++) { $treeButtons.Controls.Add($buttons[$i], $i, 0) }
+
+    $tips.SetTip($newButton, 'New connection. If a folder is selected it is created inside it, with that folder''s default settings.')
+    $tips.SetTip($folderButton, 'New folder (inside the selected folder, if there is one).')
+    $tips.SetTip($editButton, 'Edit the selected connection, or the selected folder''s default settings.')
+    $tips.SetTip($pinButton, 'Pin the selected connection to the top of the list, or unpin it.')
+    $tips.SetTip($deleteButton, 'Delete the selected connection or folder.')
 
     # Order matters for docking: Fill is added first so Top and Bottom take their
     # space from the edges rather than overlapping it.
@@ -230,12 +324,14 @@ function New-PSTermMainWindow {
     $state.StatusRight = $statusRight
 
     $form.Controls.Add($split)
+    $form.Controls.Add($ribbon)
     $form.Controls.Add($topBar)
     $form.Controls.Add($status)
 
     Apply-PSTermTheme -State $state
 
-    $split.SplitterDistance = [int](230 * $scale)
+    $split.SplitterDistance = [int]([Math]::Max(180, [double]$settings.sidebarWidth) * $scale)
+    Set-PSTermSidebar -State $state -Visible ([bool]$settings.sidebarVisible) -NoSave
 
     # =====================================================================
     # Behaviour
@@ -251,10 +347,22 @@ function New-PSTermMainWindow {
         Close-PSTermTab -State $state -Index $e.Index
     }.GetNewClosure())
 
-    # The plus button opens the session menu. Moving focus to the quick-connect
-    # bar, as it used to, gave no indication of what to do next.
+    # The plus button opens the connection editor, as the new-tab button of a
+    # browser opens a page.
     $tabs.Add_NewTabRequested({
-        Show-PSTermNewSessionMenu -State $state -Anchor $state.TabStrip
+        Invoke-PSTermNewConnection -State $state
+    }.GetNewClosure())
+
+    $tabs.Add_ContextRequested({
+        param($sender, $e)
+        Show-PSTermTabContext -State $state -Index $e.Index -Location $e.ScreenLocation
+    }.GetNewClosure())
+
+    $sidebarButton.Add_Click({ Set-PSTermSidebar -State $state -Toggle }.GetNewClosure())
+
+    $ribbon.Add_ItemClicked({
+        param($sender, $e)
+        Invoke-PSTermRibbonAction -State $state -Key $e.Item.Key -Location $e.MenuLocation
     }.GetNewClosure())
 
     $quickBox.Add_KeyDown({
@@ -281,32 +389,86 @@ function New-PSTermMainWindow {
     # The tree scrolls itself on the wheel and on arrow keys, so the bar is
     # refreshed from the tree rather than trying to intercept every path.
     $tree.Add_MouseWheel({ Update-PSTermTreeScroll -State $state }.GetNewClosure())
-    $tree.Add_AfterSelect({ Update-PSTermTreeScroll -State $state }.GetNewClosure())
-    $tree.Add_AfterExpand({ Update-PSTermTreeScroll -State $state }.GetNewClosure())
-    $tree.Add_AfterCollapse({ Update-PSTermTreeScroll -State $state }.GetNewClosure())
+    $tree.Add_AfterSelect({ Update-PSTermTreeScroll -State $state; Update-PSTermTreeButtons -State $state }.GetNewClosure())
+    $tree.Add_AfterExpand({
+        param($sender, $e)
+        if (-not $state.TreeBuilding) { $state.Collapsed.Remove([string]$e.Node.Tag) }
+        Update-PSTermTreeScroll -State $state
+    }.GetNewClosure())
+    $tree.Add_AfterCollapse({
+        param($sender, $e)
+        if (-not $state.TreeBuilding) { $state.Collapsed[[string]$e.Node.Tag] = $true }
+        Update-PSTermTreeScroll -State $state
+    }.GetNewClosure())
 
     $tree.Add_NodeMouseDoubleClick({
         param($sender, $e)
-        $id = $e.Node.Tag
-        if ($id) { Connect-PSTermProfileById -State $state -Id ([string]$id) }
+        $info = Get-PSTermNodeInfo -Node $e.Node
+        if (-not $info) { return }
+        switch ($info.Kind) {
+            'p'   { Connect-PSTermProfileById -State $state -Id $info.Value }
+            'com' { Open-PSTermDetectedPort -State $state -PortName $info.Value }
+        }
     }.GetNewClosure())
 
     $tree.Add_KeyDown({
         param($sender, $e)
-        if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter -and $sender.SelectedNode -and $sender.SelectedNode.Tag) {
+        $info = Get-PSTermNodeInfo -Node $sender.SelectedNode
+        if (-not $info) { return }
+        if ($e.KeyCode -eq [System.Windows.Forms.Keys]::Enter) {
             $e.SuppressKeyPress = $true
-            Connect-PSTermProfileById -State $state -Id ([string]$sender.SelectedNode.Tag)
+            switch ($info.Kind) {
+                'p'   { Connect-PSTermProfileById -State $state -Id $info.Value }
+                'com' { Open-PSTermDetectedPort -State $state -PortName $info.Value }
+            }
+        }
+        elseif ($e.KeyCode -eq [System.Windows.Forms.Keys]::Delete) {
+            $e.SuppressKeyPress = $true
+            Invoke-PSTermDeleteSelected -State $state
+        }
+        elseif ($e.KeyCode -eq [System.Windows.Forms.Keys]::F2 -and $info.Kind -eq 'f') {
+            $e.SuppressKeyPress = $true
+            Invoke-PSTermRenameFolder -State $state -Path $info.Value
         }
     }.GetNewClosure())
 
-    $newButton.Add_Click({ Invoke-PSTermEditProfile -State $state -Profile $null }.GetNewClosure())
-    $editButton.Add_Click({
-        $node = $state.Tree.SelectedNode
-        if (-not $node -or -not $node.Tag) { return }
-        $profile = Get-PSTermProfileById -Store $state.Store -Id ([string]$node.Tag)
-        if ($profile) { Invoke-PSTermEditProfile -State $state -Profile $profile }
+    $tree.Add_NodeContext({
+        param($sender, $e)
+        Show-PSTermTreeContext -State $state -Node $e.Node -Location $e.ScreenLocation
     }.GetNewClosure())
-    $deleteButton.Add_Click({ Invoke-PSTermDeleteProfile -State $state }.GetNewClosure())
+
+    $tree.Add_NodeButtonClicked({
+        param($sender, $e)
+        $info = Get-PSTermNodeInfo -Node $e.Node
+        if (-not $info) { return }
+        if ($e.Button -eq 'add') { Invoke-PSTermNewConnection -State $state -Folder $info.Value }
+        elseif ($e.Button -eq 'pin') { Switch-PSTermPinned -State $state -Id $info.Value }
+    }.GetNewClosure())
+
+    $tree.Add_DropQuery({
+        param($sender, $e)
+        $e.Allowed = Test-PSTermDrop -State $state -Source $e.Source -Target $e.Target
+    }.GetNewClosure())
+    $tree.Add_DropCompleted({
+        param($sender, $e)
+        Complete-PSTermDrop -State $state -Source $e.Source -Target $e.Target
+    }.GetNewClosure())
+
+    $newButton.Add_Click({
+        $info = Get-PSTermNodeInfo -Node $state.Tree.SelectedNode
+        $folder = if ($info -and $info.Kind -eq 'f') { $info.Value } elseif ($info -and $info.Kind -eq 'p') { [string](Get-PSTermProfileById -Store $state.Store -Id $info.Value).folder } else { '' }
+        Invoke-PSTermNewConnection -State $state -Folder $folder
+    }.GetNewClosure())
+    $folderButton.Add_Click({
+        $info = Get-PSTermNodeInfo -Node $state.Tree.SelectedNode
+        Invoke-PSTermNewFolder -State $state -Parent $(if ($info -and $info.Kind -eq 'f') { $info.Value } else { '' })
+    }.GetNewClosure())
+    $editButton.Add_Click({ Invoke-PSTermEditSelected -State $state }.GetNewClosure())
+    $pinButton.Add_Click({
+        $info = Get-PSTermNodeInfo -Node $state.Tree.SelectedNode
+        if ($info -and $info.Kind -eq 'p') { Switch-PSTermPinned -State $state -Id $info.Value }
+    }.GetNewClosure())
+    $deleteButton.Add_Click({ Invoke-PSTermDeleteSelected -State $state }.GetNewClosure())
 
     $menuButton.Add_Click({
         Show-PSTermMenu -State $state -Anchor $menuButton
@@ -317,16 +479,29 @@ function New-PSTermMainWindow {
         Invoke-PSTermShortcut -State $state -EventArgs $e
     }.GetNewClosure())
 
+    $split.Add_SplitterMoved({
+        if (-not $split.Panel1Collapsed) { $state.PendingSidebarWidth = [int]($split.SplitterDistance / $scale) }
+    }.GetNewClosure())
+
     $form.Add_FormClosing({
         param($sender, $e)
-        if (-not (Confirm-PSTermClose -State $state)) { $e.Cancel = $true }
+        if (-not (Confirm-PSTermClose -State $state)) { $e.Cancel = $true; return }
+        if ($state.MainTimer) { $state.MainTimer.Stop() }
+        if ($state.Ports) { $state.Ports.Dispose() }
+        if ($state.PendingSidebarWidth -gt 0) {
+            $current = Import-PSTermSettings -Root $state.Root
+            $current.sidebarWidth = $state.PendingSidebarWidth
+            Save-PSTermSettings -Root $state.Root -Settings $current
+        }
     }.GetNewClosure())
 
     $form.Add_Shown({
         [PSTerm.Render.FontProbe]::Warm()
         Set-PSTermTitleBarTheme -Form $state.Form -Dark ($state.Theme.Mode -eq 'Dark')
         Update-PSTermTree -State $state
+        Update-PSTermStatus -State $state
         $state.QuickBox.Focus() | Out-Null
+        Start-PSTermBackgroundWork -State $state
         Set-PSTermStatusMessage -State $state -Message 'Ctrl+Shift+P for the command palette. Type a destination above and press Enter.'
     }.GetNewClosure())
 
@@ -352,28 +527,156 @@ function Apply-PSTermTheme {
     $controlTheme = New-PSTermControlTheme -Theme $theme
     $State.Tree.ApplyTheme($controlTheme)
     $State.TreeScroll.ApplyTheme($controlTheme)
+    $State.Ribbon.ApplyTheme($controlTheme)
+    $State.Tips.Apply($controlTheme)
     Set-PSTermTabStripTheme -Strip $State.TabStrip -Theme $theme
-    Set-PSTermTitleBarTheme -Form $State.Form -Dark ($theme.Mode -eq 'Dark')
+    Set-PSTermAppChrome -Theme $theme -Root $State.Root
     $State.Form.Invalidate($true)
+}
+
+# =============================================================================
+# Sidebar
+# =============================================================================
+
+function Set-PSTermSidebar {
+    <#
+    .SYNOPSIS
+        Show or hide the session list.
+    #>
+    param(
+        [Parameter(Mandatory)]$State,
+        [bool]$Visible,
+        [switch]$Toggle,
+        [switch]$NoSave
+    )
+
+    if ($Toggle) { $Visible = $State.Split.Panel1Collapsed }
+    $State.Split.Panel1Collapsed = -not $Visible
+
+    # A left chevron folds the panel away; a right one brings it back.
+    $hasIcons = [bool][PSTerm.Render.IconFont]::Family
+    $State.SidebarButton.Text = if ($Visible) { if ($hasIcons) { ([string][char]0xE76B) } else { '<' } } else { if ($hasIcons) { ([string][char]0xE76C) } else { '>' } }
+
+    $item = $State.Ribbon.Find('sidebar')
+    if ($item) { $item.Checked = $Visible; $State.Ribbon.Invalidate() }
+
+    if (-not $NoSave) {
+        $current = Import-PSTermSettings -Root $State.Root
+        $current.sidebarVisible = $Visible
+        Save-PSTermSettings -Root $State.Root -Settings $current
+    }
+    if ($State.Tabs.Count -gt 0) {
+        $active = Get-PSTermActiveTab -State $State
+        if ($active) { $active.Control.Focus() | Out-Null }
+    }
+}
+
+# =============================================================================
+# Toolbar
+# =============================================================================
+
+function Invoke-PSTermRibbonAction {
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$Key, [System.Drawing.Point]$Location)
+
+    $tab = Get-PSTermActiveTab -State $State
+    $terminal = if ($tab) { $tab.Control } else { $null }
+
+    switch ($Key) {
+        'new'       { Invoke-PSTermNewConnection -State $State }
+        'reconnect' { Restart-PSTermTab -State $State }
+        'duplicate' { if ($tab) { [void](New-PSTermSessionTab -State $State -Profile $tab.Profile -Temporary:([bool]$tab.Temp)) } }
+        'close'     { Close-PSTermTab -State $State }
+        'copy'      { if ($terminal) { $terminal.CopySelection(); $terminal.Focus() | Out-Null } }
+        'paste'     { if ($terminal) { $terminal.PasteClipboard(); $terminal.Focus() | Out-Null } }
+        'selectall' { if ($terminal) { $terminal.SelectAll(); $terminal.Focus() | Out-Null } }
+        'find'      { Show-PSTermFind -State $State }
+        'clear'     { if ($terminal) { $terminal.ClearScrollback(); $terminal.Focus() | Out-Null } }
+        'reset'     { if ($terminal) { $terminal.ResetTerminal(); $terminal.Focus() | Out-Null } }
+        'break'     { Invoke-PSTermSendBreak -State $State }
+        'creds'     { Show-PSTermCredentialMenu -State $State -Location $Location }
+        'import'    { Show-PSTermImportMenu -State $State -Location $Location }
+        'export'    { Show-PSTermExportMenu -State $State -Location $Location }
+        'sidebar'   { Set-PSTermSidebar -State $State -Visible ([bool]$State.Ribbon.Find('sidebar').Checked) }
+        'theme'     { Invoke-PSTermToggleTheme -State $State }
+    }
+}
+
+function Show-PSTermImportMenu {
+    param([Parameter(Mandatory)]$State, [System.Drawing.Point]$Location)
+
+    $menu = New-PSTermMenu -Theme $State.Theme
+    $items = @(
+        @('From CSV file...', { Invoke-PSTermImportCsv -State $State }, 'Create connections from a spreadsheet export, for example a NetBox IP address list.'),
+        @('From PSTerm session file...', { Invoke-PSTermImportSessions -State $State }, 'Load a .psterm file exported from PSTerm.'),
+        @('From PuTTY sessions', { Invoke-PSTermImportPutty -State $State }, 'Read the sessions saved by PuTTY on this PC.'),
+        @('From ssh_config hosts', { Invoke-PSTermImportSshConfig -State $State }, 'Read the hosts in ~/.ssh/config.')
+    )
+    foreach ($entry in $items) {
+        $item = $menu.Items.Add($entry[0])
+        $item.ToolTipText = $entry[2]
+        $item.Add_Click($entry[1].GetNewClosure())
+    }
+    $menu.Show($Location)
+}
+
+function Show-PSTermExportMenu {
+    param([Parameter(Mandatory)]$State, [System.Drawing.Point]$Location)
+
+    $menu = New-PSTermMenu -Theme $State.Theme
+    $all = $menu.Items.Add('All connections...')
+    $all.ToolTipText = 'Save every connection and folder to a .psterm file.'
+    $all.Add_Click({ Invoke-PSTermExportSessions -State $State -Scope All }.GetNewClosure())
+
+    $info = Get-PSTermNodeInfo -Node $State.Tree.SelectedNode
+    if ($info -and $info.Kind -eq 'f') {
+        $path = $info.Value
+        $item = $menu.Items.Add("Folder '$path'...")
+        $item.Add_Click({ Invoke-PSTermExportSessions -State $State -Scope Folder -Target $path }.GetNewClosure())
+    }
+    elseif ($info -and $info.Kind -eq 'p') {
+        $id = $info.Value
+        $profile = Get-PSTermProfileById -Store $State.Store -Id $id
+        if ($profile) {
+            $item = $menu.Items.Add("Connection '$($profile.name)'...")
+            $item.Add_Click({ Invoke-PSTermExportSessions -State $State -Scope Profile -Target $id }.GetNewClosure())
+        }
+    }
+    $menu.Show($Location)
 }
 
 # =============================================================================
 # Session tree
 # =============================================================================
 
+function Get-PSTermNodeInfo {
+    <#
+    .SYNOPSIS
+        What a tree node is: Kind p (connection), f (folder), pin, ports or com.
+    #>
+    param($Node)
+    if (-not $Node -or -not $Node.Tag) { return $null }
+    $text = [string]$Node.Tag
+    $colon = $text.IndexOf(':')
+    if ($colon -lt 0) { return $null }
+    [pscustomobject]@{ Kind = $text.Substring(0, $colon); Value = $text.Substring($colon + 1) }
+}
+
 function Update-PSTermTree {
     param([Parameter(Mandatory)]$State)
 
     $tree = $State.Tree
     $filter = Get-PSTermPlaceholderText -TextBox $State.SearchBox
+    $selectedTag = if ($tree.SelectedNode) { [string]$tree.SelectedNode.Tag } else { '' }
 
-    $selectedId = if ($tree.SelectedNode) { [string]$tree.SelectedNode.Tag } else { '' }
-
+    $State.TreeBuilding = $true
     $tree.BeginUpdate()
     try {
         $tree.Nodes.Clear()
+        $tree.PinnedIds.Clear()
+        foreach ($id in @($State.Store.pinned)) { [void]$tree.PinnedIds.Add([string]$id) }
 
         $profiles = @($State.Store.profiles)
+        $pattern = $null
         if ($filter) {
             # -like treats [ ] * ? as wildcards, and a lone [ is an invalid pattern
             # that throws. Searching for "[lab" must mean those characters.
@@ -384,48 +687,120 @@ function Update-PSTermTree {
             })
         }
 
-        $folderNodes = @{}
-        foreach ($profile in ($profiles | Sort-Object { [string]$_.folder }, { [string]$_.name })) {
-            $folder = [string]$profile.folder
-            $parent = $null
-
-            if ($folder) {
-                if (-not $folderNodes.ContainsKey($folder)) {
-                    # Nested folders are written as "Lab/Switches".
-                    $parentCollection = $tree.Nodes
-                    $accumulated = ''
-                    foreach ($segment in ($folder -split '[\\/]' | Where-Object { $_ })) {
-                        $accumulated = if ($accumulated) { "$accumulated/$segment" } else { $segment }
-                        if (-not $folderNodes.ContainsKey($accumulated)) {
-                            $node = $parentCollection.Add($segment)
-                            $node.Tag = $null
-                            $folderNodes[$accumulated] = $node
-                        }
-                        $parentCollection = $folderNodes[$accumulated].Nodes
-                    }
-                }
-                $parent = $folderNodes[$folder]
-            }
-
-            $label = [string]$profile.name
+        $label = {
+            param($profile)
+            $text = [string]$profile.name
             $target = Get-PSTermProfileTarget -Profile $profile
-            if ($target -and $target -ne $label) { $label = "$label   -   $target" }
-
-            $node = if ($parent) { $parent.Nodes.Add($label) } else { $tree.Nodes.Add($label) }
-            $node.Tag = [string]$profile.id
-            $node.ToolTipText = "$($profile.type): $target"
+            if ($target -and $target -ne $text) { $text = "$text   -   $target" }
+            $text
         }
 
-        $tree.ExpandAll()
-        Update-PSTermTreeScroll -State $State
+        $addProfileNode = {
+            param($collection, $profile)
+            $node = $collection.Add((& $label $profile))
+            $node.Tag = "p:$($profile.id)"
+            $node.ToolTipText = "$($profile.type): $(Get-PSTermProfileTarget -Profile $profile)"
+            $node
+        }
 
-        if ($selectedId) {
-            $match = Find-PSTermTreeNode -Nodes $tree.Nodes -Id $selectedId
+        # Pinned connections come first.
+        $pinned = @(@($State.Store.pinned) | ForEach-Object {
+            $id = $_
+            $profiles | Where-Object { $_.id -eq $id }
+        } | Where-Object { $_ })
+        if ($pinned.Count -gt 0) {
+            $section = $tree.Nodes.Add('Pinned')
+            $section.Tag = 'pin:'
+            foreach ($profile in $pinned) { [void](& $addProfileNode $section.Nodes $profile) }
+        }
+
+        # Serial adapters that are plugged in right now.
+        $ports = @($State.DetectedPorts)
+        if ($ports.Count -gt 0 -and (-not $pattern -or 'serial ports' -like $pattern -or @($ports | Where-Object { $_.PortName -like $pattern }).Count -gt 0)) {
+            $section = $tree.Nodes.Add('Detected serial ports')
+            $section.Tag = 'ports:'
+            foreach ($port in $ports) {
+                $text = $port.PortName
+                if ($port.Description) { $text = "$($port.PortName)   -   $($port.Description)" }
+                $open = @($State.Tabs | Where-Object { -not $_.Closed -and $_.Profile.type -eq 'Serial' -and $_.Profile.serial.portName -eq $port.PortName }).Count -gt 0
+                if ($open) { $text += '   (open)' }
+                $node = $section.Nodes.Add($text)
+                $node.Tag = "com:$($port.PortName)"
+                $node.ToolTipText = "Not saved. Double-click to open $($port.PortName) at $((Import-PSTermSettings -Root $State.Root).detectedPortBaud) baud."
+            }
+        }
+
+        # Folders, including empty ones, and connections inside them.
+        $folderPaths = @(Get-PSTermAllFolderPaths -Store $State.Store)
+        if ($pattern) {
+            $needed = New-Object 'System.Collections.Generic.HashSet[string]' ([StringComparer]::OrdinalIgnoreCase)
+            foreach ($profile in $profiles) {
+                $path = [string]$profile.folder
+                while ($path) { [void]$needed.Add($path); $path = Get-PSTermParentFolder -Path $path }
+            }
+            $folderPaths = @($folderPaths | Where-Object { $needed.Contains($_) })
+        }
+
+        $folderNodes = @{}
+        foreach ($path in $folderPaths) {
+            $parentPath = Get-PSTermParentFolder -Path $path
+            # Assigned in each branch: an if-expression would unroll the collection.
+            if ($parentPath -and $folderNodes.ContainsKey($parentPath)) { $collection = $folderNodes[$parentPath].Nodes } else { $collection = $tree.Nodes }
+            $segment = @(Split-PSTermFolderPath -Path $path)[-1]
+            $node = $collection.Add($segment)
+            $node.Tag = "f:$path"
+            $folderNodes[$path] = $node
+        }
+
+        foreach ($profile in ($profiles | Sort-Object { [string]$_.name })) {
+            $folder = [string]$profile.folder
+            if ($folder -and $folderNodes.ContainsKey($folder)) { $collection = $folderNodes[$folder].Nodes } else { $collection = $tree.Nodes }
+            [void](& $addProfileNode $collection $profile)
+        }
+
+        # Open everything the operator has not folded.
+        $expand = {
+            param($nodes)
+            foreach ($n in $nodes) {
+                if ($n.Nodes.Count -gt 0 -or ([string]$n.Tag).StartsWith('f:')) {
+                    if ($pattern -or -not $State.Collapsed.ContainsKey([string]$n.Tag)) { $n.Expand() }
+                    & $expand $n.Nodes
+                }
+            }
+        }
+        & $expand $tree.Nodes
+
+        if ($selectedTag) {
+            $match = Find-PSTermTreeNode -Nodes $tree.Nodes -Tag $selectedTag
             if ($match) { $tree.SelectedNode = $match }
         }
     }
     finally {
         $tree.EndUpdate()
+        $State.TreeBuilding = $false
+    }
+
+    Update-PSTermTreeScroll -State $State
+    Update-PSTermTreeButtons -State $State
+}
+
+function Update-PSTermTreeButtons {
+    <#
+    .SYNOPSIS
+        Keep the Pin / Unpin button's caption and state in step with the selection.
+    #>
+    param([Parameter(Mandatory)]$State)
+    $info = Get-PSTermNodeInfo -Node $State.Tree.SelectedNode
+    foreach ($control in $State.TreeHost.Parent.Controls) {
+        if ($control -is [System.Windows.Forms.TableLayoutPanel]) {
+            foreach ($button in $control.Controls) {
+                if ($button.Text -in @('Pin', 'Unpin')) {
+                    $isProfile = [bool]($info -and $info.Kind -eq 'p')
+                    $button.Enabled = $isProfile
+                    $button.Text = if ($isProfile -and (Test-PSTermPinned -Store $State.Store -Id $info.Value)) { 'Unpin' } else { 'Pin' }
+                }
+            }
+        }
     }
 }
 
@@ -464,13 +839,468 @@ function Update-PSTermTreeScroll {
 }
 
 function Find-PSTermTreeNode {
-    param($Nodes, [string]$Id)
+    param($Nodes, [string]$Tag)
     foreach ($node in $Nodes) {
-        if ([string]$node.Tag -eq $Id) { return $node }
-        $child = Find-PSTermTreeNode -Nodes $node.Nodes -Id $Id
+        if ([string]$node.Tag -eq $Tag) { return $node }
+        $child = Find-PSTermTreeNode -Nodes $node.Nodes -Tag $Tag
         if ($child) { return $child }
     }
     $null
+}
+
+# ---- drag and drop -----------------------------------------------------------
+
+function Test-PSTermDrop {
+    param([Parameter(Mandatory)]$State, $Source, $Target)
+
+    $s = Get-PSTermNodeInfo -Node $Source
+    $t = Get-PSTermNodeInfo -Node $Target
+    if (-not $s) { return $false }
+
+    if ($s.Kind -eq 'p') {
+        $profile = Get-PSTermProfileById -Store $State.Store -Id $s.Value
+        if (-not $profile) { return $false }
+        if (-not $t) { return [bool]$profile.folder }
+        switch ($t.Kind) {
+            'f'   { return ([string]$profile.folder -ne $t.Value) }
+            'p'   {
+                $other = Get-PSTermProfileById -Store $State.Store -Id $t.Value
+                return ($other -and $other.id -ne $profile.id -and [string]$other.folder -ne [string]$profile.folder)
+            }
+            'pin' { return -not (Test-PSTermPinned -Store $State.Store -Id $s.Value) }
+            default { return $false }
+        }
+    }
+
+    if ($s.Kind -eq 'f') {
+        if (-not $t) { return [bool](Get-PSTermParentFolder -Path $s.Value) }
+        if ($t.Kind -ne 'f') { return $false }
+        if ($t.Value -eq $s.Value -or $t.Value -like "$($s.Value)/*") { return $false }
+        return ((Get-PSTermParentFolder -Path $s.Value) -ne $t.Value)
+    }
+    $false
+}
+
+function Complete-PSTermDrop {
+    param([Parameter(Mandatory)]$State, $Source, $Target)
+
+    $s = Get-PSTermNodeInfo -Node $Source
+    $t = Get-PSTermNodeInfo -Node $Target
+    if (-not $s) { return }
+
+    if ($s.Kind -eq 'p') {
+        if ($t -and $t.Kind -eq 'pin') {
+            Set-PSTermPinned -Store $State.Store -Id $s.Value -Pinned $true
+        }
+        else {
+            $destination = ''
+            if ($t -and $t.Kind -eq 'f') { $destination = $t.Value }
+            elseif ($t -and $t.Kind -eq 'p') { $destination = [string](Get-PSTermProfileById -Store $State.Store -Id $t.Value).folder }
+            [void](Move-PSTermProfileToFolder -Store $State.Store -Id $s.Value -Path $destination)
+        }
+    }
+    elseif ($s.Kind -eq 'f') {
+        $leaf = @(Split-PSTermFolderPath -Path $s.Value)[-1]
+        $destination = if ($t -and $t.Kind -eq 'f') { Join-PSTermFolderPath -Segments @($t.Value, $leaf) } else { $leaf }
+        [void](Rename-PSTermFolder -Store $State.Store -OldPath $s.Value -NewPath $destination)
+    }
+
+    Save-PSTermProfiles -Root $State.Root -Store $State.Store
+    Update-PSTermTree -State $State
+}
+
+# ---- context menus -----------------------------------------------------------
+
+function Add-PSTermMenuItem {
+    param($Menu, [string]$Text, [scriptblock]$Action, [string]$Tip = '', [bool]$Enabled = $true)
+    $item = $Menu.Items.Add($Text)
+    $item.Enabled = $Enabled
+    if ($Tip) { $item.ToolTipText = $Tip }
+    if ($Action) { $item.Add_Click($Action) }
+    $item
+}
+
+function Show-PSTermTreeContext {
+    param([Parameter(Mandatory)]$State, $Node, [System.Drawing.Point]$Location)
+
+    $menu = New-PSTermMenu -Theme $State.Theme
+    $info = Get-PSTermNodeInfo -Node $Node
+
+    if (-not $info) {
+        [void](Add-PSTermMenuItem $menu 'New connection...' { Invoke-PSTermNewConnection -State $State }.GetNewClosure() 'Create a connection at the top level.')
+        [void](Add-PSTermMenuItem $menu 'New folder...' { Invoke-PSTermNewFolder -State $State -Parent '' }.GetNewClosure() 'Create a folder.')
+        [void]$menu.Items.Add('-')
+        [void](Add-PSTermMenuItem $menu 'Import from CSV...' { Invoke-PSTermImportCsv -State $State }.GetNewClosure() 'Create connections from a spreadsheet export.')
+        [void](Add-PSTermMenuItem $menu 'Import PSTerm session file...' { Invoke-PSTermImportSessions -State $State }.GetNewClosure())
+        $menu.Show($Location)
+        return
+    }
+
+    switch ($info.Kind) {
+        'p' {
+            $id = $info.Value
+            $profile = Get-PSTermProfileById -Store $State.Store -Id $id
+            if (-not $profile) { return }
+            $pinned = Test-PSTermPinned -Store $State.Store -Id $id
+
+            [void](Add-PSTermMenuItem $menu 'Connect' { Connect-PSTermProfileById -State $State -Id $id }.GetNewClosure() 'Open this connection in a new tab.')
+            [void](Add-PSTermMenuItem $menu 'Edit...' { Invoke-PSTermEditSelected -State $State -ProfileId $id }.GetNewClosure() 'Change this connection''s settings.')
+            [void](Add-PSTermMenuItem $menu 'Duplicate' { Invoke-PSTermDuplicateProfile -State $State -Id $id }.GetNewClosure() 'Make a copy of this connection (without its password).')
+            [void]$menu.Items.Add('-')
+            [void](Add-PSTermMenuItem $menu $(if ($pinned) { 'Unpin' } else { 'Pin to top' }) { Switch-PSTermPinned -State $State -Id $id }.GetNewClosure() 'Keep this connection in the Pinned list at the top.')
+
+            $move = $menu.Items.Add('Move to folder')
+            $move.ToolTipText = 'Put this connection in another folder. You can also drag it there.'
+            $move.DropDown.Renderer = $menu.Renderer
+            $move.DropDown.BackColor = $State.Theme.Surface
+            $move.DropDown.ForeColor = $State.Theme.Text
+            $rootItem = $move.DropDownItems.Add('(top level)')
+            $rootItem.Enabled = [bool]$profile.folder
+            $rootItem.Add_Click({ [void](Move-PSTermProfileToFolder -Store $State.Store -Id $id -Path ''); Save-PSTermProfiles -Root $State.Root -Store $State.Store; Update-PSTermTree -State $State }.GetNewClosure())
+            foreach ($path in @(Get-PSTermAllFolderPaths -Store $State.Store)) {
+                $target = $path
+                $entry = $move.DropDownItems.Add($target)
+                $entry.Enabled = ([string]$profile.folder -ne $target)
+                $entry.Add_Click({ [void](Move-PSTermProfileToFolder -Store $State.Store -Id $id -Path $target); Save-PSTermProfiles -Root $State.Root -Store $State.Store; Update-PSTermTree -State $State }.GetNewClosure())
+            }
+
+            [void]$menu.Items.Add('-')
+            [void](Add-PSTermMenuItem $menu 'Export...' { Invoke-PSTermExportSessions -State $State -Scope Profile -Target $id }.GetNewClosure() 'Save this connection to a file you can share. The password is not included.')
+            [void](Add-PSTermMenuItem $menu 'Delete' { Invoke-PSTermDeleteProfile -State $State -Id $id }.GetNewClosure() 'Delete this connection and its saved password.')
+        }
+        'f' {
+            $path = $info.Value
+            [void](Add-PSTermMenuItem $menu 'New connection here...' { Invoke-PSTermNewConnection -State $State -Folder $path }.GetNewClosure() 'Create a connection in this folder, starting from the folder''s default settings.')
+            [void](Add-PSTermMenuItem $menu 'New subfolder...' { Invoke-PSTermNewFolder -State $State -Parent $path }.GetNewClosure())
+            [void]$menu.Items.Add('-')
+            [void](Add-PSTermMenuItem $menu 'Folder settings...' { [void](Invoke-PSTermEditProfile -State $State -FolderMode -FolderPath $path) }.GetNewClosure() 'The settings every new connection in this folder starts with: user, password, ports, terminal, logging, auto-enable.')
+            [void](Add-PSTermMenuItem $menu 'Rename...' { Invoke-PSTermRenameFolder -State $State -Path $path }.GetNewClosure() 'Rename the folder (F2).')
+            $node = $Node
+            [void](Add-PSTermMenuItem $menu $(if ($Node.IsExpanded) { 'Collapse' } else { 'Expand' }) { if ($node.IsExpanded) { $node.Collapse() } else { $node.Expand() } }.GetNewClosure())
+            [void]$menu.Items.Add('-')
+            [void](Add-PSTermMenuItem $menu 'Export folder...' { Invoke-PSTermExportSessions -State $State -Scope Folder -Target $path }.GetNewClosure() 'Save this folder, its settings and its connections to a file you can share.')
+            [void](Add-PSTermMenuItem $menu 'Import CSV into this folder...' { Invoke-PSTermImportCsv -State $State -Folder $path }.GetNewClosure())
+            [void](Add-PSTermMenuItem $menu 'Delete folder' { Invoke-PSTermDeleteFolder -State $State -Path $path }.GetNewClosure() 'Delete the folder.')
+        }
+        'com' {
+            $port = $info.Value
+            [void](Add-PSTermMenuItem $menu "Open $port" { Open-PSTermDetectedPort -State $State -PortName $port }.GetNewClosure() 'Open the port now. Nothing is saved.')
+            $baud = $menu.Items.Add('Open at baud rate')
+            $baud.DropDown.Renderer = $menu.Renderer
+            $baud.DropDown.BackColor = $State.Theme.Surface
+            $baud.DropDown.ForeColor = $State.Theme.Text
+            foreach ($rate in @(1200, 2400, 4800, 9600, 19200, 38400, 57600, 115200)) {
+                $r = $rate
+                $entry = $baud.DropDownItems.Add([string]$r)
+                $entry.Add_Click({ Open-PSTermDetectedPort -State $State -PortName $port -Baud $r }.GetNewClosure())
+            }
+            [void](Add-PSTermMenuItem $menu 'Save as connection...' { Save-PSTermDetectedPort -State $State -PortName $port }.GetNewClosure() 'Keep this port as a saved connection so you can set its speed and options.')
+        }
+        default {
+            [void](Add-PSTermMenuItem $menu 'New connection...' { Invoke-PSTermNewConnection -State $State }.GetNewClosure())
+        }
+    }
+    $menu.Show($Location)
+}
+
+# ---- tree actions --------------------------------------------------------------
+
+function Invoke-PSTermNewConnection {
+    param([Parameter(Mandatory)]$State, [string]$Folder = '')
+    [void](Invoke-PSTermEditProfile -State $State -Profile $null -Folder $Folder)
+}
+
+function Invoke-PSTermEditSelected {
+    param([Parameter(Mandatory)]$State, [string]$ProfileId = '')
+
+    if ($ProfileId) {
+        $profile = Get-PSTermProfileById -Store $State.Store -Id $ProfileId
+        if ($profile) { [void](Invoke-PSTermEditProfile -State $State -Profile $profile) }
+        return
+    }
+
+    $info = Get-PSTermNodeInfo -Node $State.Tree.SelectedNode
+    if (-not $info) { return }
+    if ($info.Kind -eq 'p') {
+        $profile = Get-PSTermProfileById -Store $State.Store -Id $info.Value
+        if ($profile) { [void](Invoke-PSTermEditProfile -State $State -Profile $profile) }
+    }
+    elseif ($info.Kind -eq 'f') {
+        [void](Invoke-PSTermEditProfile -State $State -FolderMode -FolderPath $info.Value)
+    }
+}
+
+function Invoke-PSTermNewFolder {
+    param([Parameter(Mandatory)]$State, [string]$Parent = '')
+
+    $answer = Show-PSTermInputDialog -State $State -Title 'New folder' -Prompt $(if ($Parent) { "Name of the new folder inside '$Parent':" } else { 'Name of the new folder:' }) `
+        -Tip 'Use / to create several levels at once, for example Site A/Floor 2.'
+    if (-not $answer -or -not $answer.Value.Trim()) { return }
+    $path = Join-PSTermFolderPath -Segments @($Parent, ($answer.Value.Trim() -replace '\\', '/'))
+    [void](Add-PSTermFolder -Store $State.Store -Path $path)
+    Save-PSTermProfiles -Root $State.Root -Store $State.Store
+    $State.Collapsed.Remove("f:$Parent")
+    Update-PSTermTree -State $State
+    Set-PSTermStatusMessage -State $State -Message "Created folder '$path'."
+}
+
+function Invoke-PSTermRenameFolder {
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$Path)
+
+    $leaf = @(Split-PSTermFolderPath -Path $Path)[-1]
+    $answer = Show-PSTermInputDialog -State $State -Title 'Rename folder' -Prompt "New name for '$Path':" -Value $leaf
+    if (-not $answer -or -not $answer.Value.Trim() -or $answer.Value.Trim() -eq $leaf) { return }
+    $new = Join-PSTermFolderPath -Segments @((Get-PSTermParentFolder -Path $Path), ($answer.Value.Trim() -replace '[\\/]', '-'))
+    if (Rename-PSTermFolder -Store $State.Store -OldPath $Path -NewPath $new) {
+        Save-PSTermProfiles -Root $State.Root -Store $State.Store
+        Update-PSTermTree -State $State
+    }
+}
+
+function Invoke-PSTermDeleteFolder {
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$Path)
+
+    $inside = @(@($State.Store.profiles) | Where-Object { $_.folder -eq $Path -or ([string]$_.folder) -like "$Path/*" })
+    $contents = $false
+    if ($inside.Count -gt 0) {
+        $answer = Show-PSTermMessage -Theme $State.Theme -Owner $State.Form -Title 'Delete folder' -Buttons YesNo -Level Warning `
+            -Message "'$Path' holds $($inside.Count) connection(s).`r`n`r`nYes: delete the folder AND its connections.`r`nNo: leave everything as it is."
+        if ($answer -ne 'Yes') { return }
+        $contents = $true
+    }
+    else {
+        $answer = Show-PSTermMessage -Theme $State.Theme -Owner $State.Form -Title 'Delete folder' -Buttons YesNo -Level Warning -Message "Delete the empty folder '$Path'?"
+        if ($answer -ne 'Yes') { return }
+    }
+
+    $deleted = @(Remove-PSTermFolder -Store $State.Store -Path $Path -DeleteContents:$contents)
+    foreach ($id in $deleted) {
+        foreach ($key in @("profile:$id")) { Remove-PSTermSecret -Root $State.Root -Key $key }
+    }
+    Remove-PSTermSecret -Root $State.Root -Key "folder:$Path"
+    Save-PSTermProfiles -Root $State.Root -Store $State.Store
+    Update-PSTermTree -State $State
+}
+
+function Invoke-PSTermDuplicateProfile {
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$Id)
+
+    $profile = Get-PSTermProfileById -Store $State.Store -Id $Id
+    if (-not $profile) { return }
+    $copy = Copy-PSTermObject -Value $profile
+    $copy.id = [guid]::NewGuid().ToString('N')
+    $copy.name = "$($profile.name) (copy)"
+    $copy.autoName = $false
+    # The copy has no password of its own: a secret key is tied to one connection.
+    $copy.credentialKey = ''
+    [void](Set-PSTermProfile -Store $State.Store -Profile $copy)
+    Save-PSTermProfiles -Root $State.Root -Store $State.Store
+    Update-PSTermTree -State $State
+    Set-PSTermStatusMessage -State $State -Message "Duplicated '$($profile.name)'. Set its password if it needs one."
+}
+
+function Switch-PSTermPinned {
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$Id)
+    $now = Test-PSTermPinned -Store $State.Store -Id $Id
+    Set-PSTermPinned -Store $State.Store -Id $Id -Pinned (-not $now)
+    Save-PSTermProfiles -Root $State.Root -Store $State.Store
+    Update-PSTermTree -State $State
+}
+
+function Invoke-PSTermDeleteSelected {
+    param([Parameter(Mandatory)]$State)
+    $info = Get-PSTermNodeInfo -Node $State.Tree.SelectedNode
+    if (-not $info) { Set-PSTermStatusMessage -State $State -Message 'Select a connection or folder to delete.' -Level Warning; return }
+    switch ($info.Kind) {
+        'p' { Invoke-PSTermDeleteProfile -State $State -Id $info.Value }
+        'f' { Invoke-PSTermDeleteFolder -State $State -Path $info.Value }
+        default { Set-PSTermStatusMessage -State $State -Message 'That entry cannot be deleted.' -Level Warning }
+    }
+}
+
+# =============================================================================
+# Detected serial ports
+# =============================================================================
+
+function Start-PSTermBackgroundWork {
+    <#
+    .SYNOPSIS
+        Start the timers that keep the window in step with the outside world:
+        serial ports appearing, and names arriving from DNS.
+    #>
+    param([Parameter(Mandatory)]$State)
+
+    $settings = Import-PSTermSettings -Root $State.Root
+    if ($settings.detectSerialPorts) {
+        $State.Ports = New-Object PSTerm.Automation.SerialPortWatcher
+        $State.Ports.Start(1500)
+    }
+
+    $timer = New-Object System.Windows.Forms.Timer
+    $timer.Interval = 700
+    $timer.Add_Tick({
+        Update-PSTermDetectedPorts -State $State
+        Update-PSTermLookups -State $State
+    }.GetNewClosure())
+    $timer.Start()
+    $State.MainTimer = $timer
+}
+
+function Update-PSTermDetectedPorts {
+    param([Parameter(Mandatory)]$State)
+
+    $watcher = $State.Ports
+    if (-not $watcher -or $watcher.Version -eq $State.PortsVersion) { return }
+    $State.PortsVersion = $watcher.Version
+
+    $ports = @($watcher.Ports)
+    $State.DetectedPorts = $ports
+
+    # Announce an adapter that appeared since the last look - but not the ones that
+    # were already plugged in when PSTerm started.
+    $names = @($ports | ForEach-Object { $_.PortName })
+    if ($State.PortsReady) {
+        foreach ($port in $ports) {
+            if (-not $State.KnownPorts.ContainsKey($port.PortName)) {
+                $what = if ($port.Description) { " ($($port.Description))" } else { '' }
+                Set-PSTermStatusMessage -State $State -Message "Serial port $($port.PortName)$what is available. Double-click it under Detected serial ports to open it."
+            }
+        }
+    }
+    $State.KnownPorts = @{}
+    foreach ($n in $names) { $State.KnownPorts[$n] = $true }
+    $State.PortsReady = $true
+
+    Update-PSTermTree -State $State
+}
+
+function Open-PSTermDetectedPort {
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$PortName, [int]$Baud = 0)
+
+    $settings = Import-PSTermSettings -Root $State.Root
+    if ($Baud -le 0) { $Baud = [int]$settings.detectedPortBaud }
+
+    $profile = New-PSTermProfile -Name $PortName -Type 'Serial'
+    $profile.serial.portName = $PortName
+    $profile.serial.baudRate = $Baud
+    $profile.terminal.backspace = $settings.defaultBackspace
+    $profile.terminal.encoding = $settings.defaultEncoding
+    $profile.terminal.theme = $settings.theme
+    $profile.terminal.fontFamily = $settings.fontFamily
+    $profile.terminal.fontSize = $settings.fontSize
+    [void](New-PSTermSessionTab -State $State -Profile $profile -Temporary)
+    Update-PSTermTree -State $State
+}
+
+function Save-PSTermDetectedPort {
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][string]$PortName)
+
+    $settings = Import-PSTermSettings -Root $State.Root
+    $profile = New-PSTermProfile -Name $PortName -Type 'Serial'
+    $profile.serial.portName = $PortName
+    $profile.serial.baudRate = [int]$settings.detectedPortBaud
+    [void](Invoke-PSTermEditProfile -State $State -Profile $profile)
+}
+
+# =============================================================================
+# Names that fill in by themselves
+# =============================================================================
+
+function Register-PSTermAutoName {
+    <#
+    .SYNOPSIS
+        Start looking up a name for a connection that is only called by its address.
+    #>
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)]$Profile)
+
+    $hostText = switch ($Profile.type) { 'SSH' { [string]$Profile.ssh.host } 'Telnet' { [string]$Profile.telnet.host } default { '' } }
+    if (-not [PSTerm.Automation.NameLookup]::LooksLikeAddress($hostText)) { return }
+    if (@($State.Lookups | Where-Object { $_.Profile.id -eq $Profile.id }).Count -gt 0) { return }
+
+    $State.Lookups.Add([pscustomobject]@{
+        Profile = $Profile
+        Lookup  = [PSTerm.Automation.NameLookup]::Start($hostText)
+        Started = [DateTime]::UtcNow
+    })
+}
+
+function Update-PSTermLookups {
+    param([Parameter(Mandatory)]$State)
+
+    foreach ($entry in @($State.Lookups)) {
+        $expired = ([DateTime]::UtcNow - $entry.Started).TotalSeconds -gt 12
+        if (-not $entry.Lookup.Done -and -not $expired) { continue }
+        [void]$State.Lookups.Remove($entry)
+        if ($entry.Lookup.Name -and $entry.Profile.autoName) {
+            Set-PSTermProfileName -State $State -Profile $entry.Profile -Name $entry.Lookup.Name
+        }
+    }
+}
+
+function Set-PSTermProfileName {
+    <#
+    .SYNOPSIS
+        Give a connection the name the network or the device reported.
+    #>
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)]$Profile, [Parameter(Mandatory)][string]$Name)
+
+    $Profile.name = $Name
+    $Profile.autoName = $false
+
+    $stored = Get-PSTermProfileById -Store $State.Store -Id ([string]$Profile.id)
+    if ($stored) {
+        $stored.name = $Name
+        $stored.autoName = $false
+        Save-PSTermProfiles -Root $State.Root -Store $State.Store
+        Update-PSTermTree -State $State
+    }
+
+    foreach ($tab in @($State.Tabs)) {
+        if ($tab.Profile.id -eq $Profile.id -and -not $tab.CustomTitle) { $tab.Item.Title = $Name }
+    }
+    $State.TabStrip.Invalidate()
+    Update-PSTermStatus -State $State
+    Set-PSTermStatusMessage -State $State -Message "Named the connection '$Name'."
+}
+
+function Start-PSTermPromptNameWatch {
+    <#
+    .SYNOPSIS
+        Name a connection after the device, read from its prompt.
+    .DESCRIPTION
+        Used when DNS had no answer. A switch's prompt is its host name followed by
+        > or #, so once the prompt is steady on screen that is the name.
+    #>
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)]$Tab)
+
+    $watch = [pscustomobject]@{ Ticks = 0; Last = ''; Stable = 0 }
+    $timer = New-Object System.Windows.Forms.Timer
+    $timer.Interval = 800
+    $timer.Add_Tick({
+        $watch.Ticks++
+        if ($Tab.Closed -or -not $Tab.Profile.autoName -or $watch.Ticks -gt 75) {
+            $timer.Stop(); $timer.Dispose(); return
+        }
+
+        $terminal = $Tab.Control
+        $line = ''
+        [System.Threading.Monitor]::Enter($terminal.SyncRoot)
+        try {
+            $screen = $terminal.Terminal.Screen
+            $line = $screen.GetLineText($screen.HistoryCount + $terminal.Terminal.CursorY)
+        }
+        finally { [System.Threading.Monitor]::Exit($terminal.SyncRoot) }
+
+        if ($line -match '^(?<name>[A-Za-z0-9][A-Za-z0-9._-]{1,62})(\((?:config[^)]*)\))?[>#]\s*$') {
+            if ($watch.Last -eq $Matches['name']) { $watch.Stable++ } else { $watch.Last = $Matches['name']; $watch.Stable = 1 }
+            if ($watch.Stable -ge 2) {
+                $timer.Stop(); $timer.Dispose()
+                Set-PSTermProfileName -State $State -Profile $Tab.Profile -Name $Matches['name']
+            }
+        }
+        else { $watch.Stable = 0 }
+    }.GetNewClosure())
+    $timer.Start()
 }
 
 # =============================================================================
@@ -485,15 +1315,24 @@ function Invoke-PSTermQuickConnect {
 
     # An exact profile name wins over parsing, so saved sessions are reachable by name.
     $profile = Get-PSTermProfileByName -Store $State.Store -Name $text
-    if (-not $profile) { $profile = ConvertFrom-PSTermQuickConnect -Text $text }
+    $temporary = $false
+    if (-not $profile) {
+        $profile = ConvertFrom-PSTermQuickConnect -Text $text
+        $temporary = $true
+    }
 
     if (-not $profile) {
         Set-PSTermStatusMessage -State $State -Message "Could not interpret '$text'. Try user@host, telnet host, COM3:115200 or cmd." -Level Warning
         return
     }
 
+    if ($temporary -and $profile.type -in @('SSH', 'Telnet')) {
+        $hostText = if ($profile.type -eq 'SSH') { [string]$profile.ssh.host } else { [string]$profile.telnet.host }
+        if ([PSTerm.Automation.NameLookup]::LooksLikeAddress($hostText)) { $profile.autoName = $true }
+    }
+
     Clear-PSTermPlaceholder -TextBox $State.QuickBox
-    New-PSTermSessionTab -State $State -Profile $profile
+    New-PSTermSessionTab -State $State -Profile $profile -Temporary:$temporary
 }
 
 function Connect-PSTermProfileById {
@@ -505,11 +1344,13 @@ function Connect-PSTermProfileById {
 function New-PSTermSessionTab {
     <#
     .SYNOPSIS
-        Create a tab, build the terminal and transport, and connect.
+        Create a tab and its terminal, then start connecting.
     #>
     param(
         [Parameter(Mandatory)]$State,
-        [Parameter(Mandatory)]$Profile
+        [Parameter(Mandatory)]$Profile,
+        # A connection that is not in the saved list (quick connect, a detected port).
+        [switch]$Temporary
     )
 
     $terminal = New-Object PSTerm.Render.TerminalControl
@@ -524,6 +1365,9 @@ function New-PSTermSessionTab {
     $item = $State.TabStrip.Add([string]$Profile.name, $null)
     $item.Tooltip = Get-PSTermProfileTarget -Profile $Profile
     $item.State = [PSTerm.Render.TabState]::Connecting
+    if ($Profile.mark -and $script:PSTermMarkColours.Contains([string]$Profile.mark)) {
+        $item.Mark = $script:PSTermMarkColours[[string]$Profile.mark]
+    }
 
     # The control must be realised before its grid size is meaningful, so the
     # transport is told the real size rather than the 80x24 default.
@@ -535,73 +1379,205 @@ function New-PSTermSessionTab {
         Control     = $terminal
         Session     = $null
         Profile     = $Profile
+        Temp        = [bool]$Temporary
         Closed      = $false
         Logger      = $null
         RemoteTitle = ''
         AutoInputStarted = $false
+        CustomTitle = $false
+        User        = ''
+        Password    = $null
+        Probe       = $null
     }
     $State.Tabs.Add($tab)
     $item.Tag = $tab
     Show-PSTermTabContent -State $State
 
+    # Input, resize and the other handlers belong to the terminal, not to one
+    # connection attempt, so they are wired once here.
+    $terminal.Add_Input({
+        param($sender, $e)
+        if ($tab.Session) { $tab.Session.Send($e.Text) }
+    }.GetNewClosure())
+
+    $terminal.Add_TerminalResized({
+        param($sender, $e)
+        if ($tab.Session) { $tab.Session.Resize($e.Cols, $e.Rows) }
+        Update-PSTermStatus -State $State
+    }.GetNewClosure())
+
+    # Multi-line paste into a terminal that has not asked for bracketed paste runs
+    # every line as it lands. Ask first.
+    $terminal.Add_PasteRequested({
+        param($sender, $e)
+        $current = Import-PSTermSettings -Root $State.Root
+        if (-not $current.confirmMultilinePaste) { return }
+        $answer = Show-PSTermMessage -Theme $State.Theme -Owner $State.Form `
+            -Title 'Paste' -Buttons YesNo `
+            -Message "Paste $($e.LineCount) lines? Each line break is sent as Enter, so every line runs as soon as it arrives."
+        if ($answer -ne 'Yes') { $e.Cancel = $true }
+    }.GetNewClosure())
+
+    $terminal.Add_TitleChanged({
+        param($sender, $e)
+        if (-not $e.Text) { return }
+        # The tab keeps the profile name: it is what the operator chose and it
+        # fits. The host's own title goes where there is room for it.
+        $tab.RemoteTitle = $e.Text
+        $tab.Item.Tooltip = $e.Text
+        Update-PSTermStatus -State $State
+    }.GetNewClosure())
+
+    Start-PSTermConnection -State $State -Tab $tab
+
+    Update-PSTermStatus -State $State
+    $terminal.Focus() | Out-Null
+    $tab
+}
+
+function Stop-PSTermConnectionAttempt {
+    <#
+    .SYNOPSIS
+        End a tab's connection attempt before it started, saying why in the terminal.
+    #>
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)]$Tab, [Parameter(Mandatory)][string]$Message, [string]$Level = 'Warning')
+
+    $Tab.Closed = $true
+    $Tab.Item.State = [PSTerm.Render.TabState]::Failed
+    $State.TabStrip.Invalidate()
+    try { $Tab.Control.Feed("`r`n  $Message`r`n") } catch { }
+    Set-PSTermStatusMessage -State $State -Message $Message -Level $Level
+    Update-PSTermStatus -State $State
+}
+
+function Start-PSTermConnection {
+    <#
+    .SYNOPSIS
+        Work out who to log in as, check an unknown SSH host key, then connect.
+    #>
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)]$Tab)
+
+    $profile = $Tab.Profile
+    $Tab.User = ''
+    $Tab.Password = $null
+
+    if ($profile.type -ne 'SSH') {
+        if ($profile.type -eq 'Telnet') {
+            $Tab.Password = (Resolve-PSTermLogin -Store $State.Store -Root $State.Root -Profile $profile).Password
+        }
+        Complete-PSTermConnection -State $State -Tab $Tab
+        return
+    }
+
+    $login = Resolve-PSTermLogin -Store $State.Store -Root $State.Root -Profile $profile
+    $user = [string]$login.User
+    if (-not $user) { $user = [string](Import-PSTermSettings -Root $State.Root).defaultSshUser }
+
+    # No user anywhere: ask, rather than letting ssh quietly use the Windows account
+    # name - which a device with centralised logins treats as a failed attempt.
+    if (-not $user) {
+        $answer = Show-PSTermInputDialog -State $State -Title 'SSH user name' `
+            -Prompt "Which user should PSTerm log in to $($profile.ssh.host) as?" `
+            -CheckboxText 'Remember this user name for the connection' `
+            -Tip 'PSTerm does not guess your Windows user name, because that is rarely the account on a switch or router.'
+        if (-not $answer -or -not $answer.Value.Trim()) {
+            Stop-PSTermConnectionAttempt -State $State -Tab $Tab -Message 'Not connected: no user name was given.'
+            return
+        }
+        $user = $answer.Value.Trim()
+        if ($answer.Checked -and -not $Tab.Temp) {
+            $stored = Get-PSTermProfileById -Store $State.Store -Id ([string]$profile.id)
+            if ($stored) { $stored.ssh.user = $user; Save-PSTermProfiles -Root $State.Root -Store $State.Store }
+        }
+    }
+    $Tab.User = $user
+    $Tab.Password = $login.Password
+
+    # An unknown host key is asked about in a dialog, before the session exists, so
+    # the question never lands in the middle of a login in the terminal.
+    if (-not $profile.ssh.autoAcceptHostKey -and -not $profile.ssh.proxyJump) {
+        $Tab.Control.Feed("`r`n  Checking the host key of $($profile.ssh.host)...`r`n")
+        Set-PSTermStatusMessage -State $State -Message "Checking the host key of $($profile.ssh.host)..."
+        $probe = [PSTerm.Automation.HostKeyProbe]::Start((New-PSTermSshOptions -Profile $profile -User $user))
+        $Tab.Probe = $probe
+
+        $timer = New-Object System.Windows.Forms.Timer
+        $timer.Interval = 100
+        $timer.Add_Tick({
+            if (-not $probe.Done) { return }
+            $timer.Stop(); $timer.Dispose()
+            if ($Tab.Closed) { return }
+
+            $keys = @($probe.Keys)
+            if (-not $probe.Known -and $keys.Count -gt 0) {
+                $decision = Show-PSTermHostKeyDialog -State $State -HostName ([string]$profile.ssh.host) -Keys $keys
+                if ($decision -eq 'Reject') {
+                    Stop-PSTermConnectionAttempt -State $State -Tab $Tab -Message "Not connected: the host key of $($profile.ssh.host) was not trusted."
+                    return
+                }
+                [PSTerm.Automation.HostKeyProbe]::Trust($probe)
+                if ($decision -eq 'Always') {
+                    $profile.ssh.autoAcceptHostKey = $true
+                    $stored = Get-PSTermProfileById -Store $State.Store -Id ([string]$profile.id)
+                    if ($stored) { $stored.ssh.autoAcceptHostKey = $true; Save-PSTermProfiles -Root $State.Root -Store $State.Store }
+                }
+            }
+            Complete-PSTermConnection -State $State -Tab $Tab
+        }.GetNewClosure())
+        $timer.Start()
+        return
+    }
+
+    Complete-PSTermConnection -State $State -Tab $Tab
+}
+
+function Complete-PSTermConnection {
+    <#
+    .SYNOPSIS
+        Build the transport and the session, wire up automation, and connect.
+    #>
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)]$Tab)
+
+    $Profile = $Tab.Profile
+    $terminal = $Tab.Control
+    $item = $Tab.Item
+
     try {
-        $backend = New-PSTermBackend -Profile $Profile -Cols $terminal.Cols -Rows $terminal.Rows
+        $backend = New-PSTermBackend -Profile $Profile -Cols $terminal.Cols -Rows $terminal.Rows -User $Tab.User
 
         $encoding = ConvertTo-PSTermEnum ([PSTerm.Vt.TerminalEncoding]) $Profile.terminal.encoding ([PSTerm.Vt.TerminalEncoding]::Utf8)
         $decoder = New-Object PSTerm.Vt.StreamDecoder($encoding)
 
         $session = New-Object PSTerm.TerminalSession($backend, $terminal, $terminal.Terminal, $decoder)
         $session.SynchronizingObject = $terminal
-        $tab.Session = $session
+        $Tab.Session = $session
 
         $loggerFailure = ''
         $logger = New-PSTermLogger -Profile $Profile -Root $State.Root -Failure ([ref]$loggerFailure)
         if ($logger) {
             $session.Logger = $logger
-            $tab.Logger = $logger
+            $Tab.Logger = $logger
         }
         elseif ($loggerFailure) {
             $terminal.Feed("`r`n  Logging is on for this profile but could not be started:`r`n  $loggerFailure`r`n`r`n")
             Set-PSTermStatusMessage -State $State -Message "Logging could not be started: $loggerFailure" -Level Warning
         }
 
-        # Keystrokes and terminal replies both arrive as Input.
-        $terminal.Add_Input({
-            param($sender, $e)
-            if ($tab.Session) { $tab.Session.Send($e.Text) }
-        }.GetNewClosure())
+        Add-PSTermAutomation -State $State -Tab $Tab -Session $session
 
-        $terminal.Add_TerminalResized({
+        $session.Add_RuleMatched({
             param($sender, $e)
-            if ($tab.Session) { $tab.Session.Resize($e.Cols, $e.Rows) }
-            Update-PSTermStatus -State $State
-        }.GetNewClosure())
-
-        # Multi-line paste into a terminal that has not asked for bracketed paste runs
-        # every line as it lands. Ask first.
-        $terminal.Add_PasteRequested({
-            param($sender, $e)
-            $current = Import-PSTermSettings -Root $State.Root
-            if (-not $current.confirmMultilinePaste) { return }
-            $answer = Show-PSTermMessage -Theme $State.Theme -Owner $State.Form `
-                -Title 'Paste' -Buttons YesNo `
-                -Message "Paste $($e.LineCount) lines? Each line break is sent as Enter, so every line runs as soon as it arrives."
-            if ($answer -ne 'Yes') { $e.Cancel = $true }
-        }.GetNewClosure())
-
-        $terminal.Add_TitleChanged({
-            param($sender, $e)
-            if (-not $e.Text) { return }
-            # The tab keeps the profile name: it is what the operator chose and it
-            # fits. The host's own title goes where there is room for it.
-            $tab.RemoteTitle = $e.Text
-            $tab.Item.Tooltip = $e.Text
-            Update-PSTermStatus -State $State
+            if ($e.Message -ne 'hostkey-prompt' -or $Tab.Closed) { return }
+            # Only reached when the pre-flight check could not read the key (a jump host,
+            # an algorithm the scanner does not offer): ssh itself is asking.
+            $answer = Show-PSTermMessage -Theme $State.Theme -Owner $State.Form -Title 'Unknown host key' -Buttons YesNo `
+                -Message "The server's host key is not known yet. Trust it and continue connecting?"
+            $Tab.Session.Send($(if ($answer -eq 'Yes') { "yes`r" } else { "no`r" }))
         }.GetNewClosure())
 
         $session.Add_SessionClosed({
             param($sender, $e)
-            Complete-PSTermTab -State $State -Tab $tab -Reason $e.Reason -ExitCode $e.ExitCode
+            Complete-PSTermTab -State $State -Tab $Tab -Reason $e.Reason -ExitCode $e.ExitCode
         }.GetNewClosure())
 
         $session.Add_StatusChanged({
@@ -613,19 +1589,26 @@ function New-PSTermSessionTab {
         # Connect() returning says nothing about it; the dot stays amber until then.
         $session.Add_Connected({
             param($sender, $e)
-            if ($tab.Closed) { return }
-            $tab.Item.State = [PSTerm.Render.TabState]::Connected
+            if ($Tab.Closed) { return }
+            $Tab.Item.State = [PSTerm.Render.TabState]::Connected
             $State.TabStrip.Invalidate()
             Update-PSTermStatus -State $State
-            Set-PSTermStatusMessage -State $State -Message "Connected: $(Get-PSTermProfileTarget -Profile $tab.Profile)"
+            Set-PSTermStatusMessage -State $State -Message "Connected: $(Get-PSTermProfileTarget -Profile $Tab.Profile)"
+
+            if ($Tab.Profile.autoName) {
+                Register-PSTermAutoName -State $State -Profile $Tab.Profile
+                Start-PSTermPromptNameWatch -State $State -Tab $Tab
+            }
 
             # Lines to send once connected. Never put a password here: profiles.json
             # is plain text.
-            if (-not $tab.AutoInputStarted) {
-                $tab.AutoInputStarted = $true
-                $autoInput = @($tab.Profile.autoInput | Where-Object { $_ })
+            if (-not $Tab.AutoInputStarted) {
+                $Tab.AutoInputStarted = $true
+                $autoInput = @($Tab.Profile.autoInput | Where-Object { $_ })
                 if ($autoInput.Count -gt 0) {
-                    Start-PSTermAutoInput -Tab $tab -Lines $autoInput
+                    # Auto-enable gets the prompt first; the commands follow it.
+                    $hold = if ($Tab.Profile.autoEnable.enabled) { [int]$Tab.Profile.autoEnable.delayMs + 3000 } else { 0 }
+                    Start-PSTermAutoInput -Tab $Tab -Lines $autoInput -InitialDelayMs $hold
                 }
             }
         }.GetNewClosure())
@@ -633,7 +1616,7 @@ function New-PSTermSessionTab {
         $session.Connect()
     }
     catch {
-        $tab.Closed = $true
+        $Tab.Closed = $true
         $item.State = [PSTerm.Render.TabState]::Failed
         $State.TabStrip.Invalidate()
         $message = $_.Exception.Message
@@ -642,8 +1625,48 @@ function New-PSTermSessionTab {
     }
 
     Update-PSTermStatus -State $State
-    $terminal.Focus() | Out-Null
-    $tab
+}
+
+function Add-PSTermAutomation {
+    <#
+    .SYNOPSIS
+        Teach a session to answer its login and enable prompts.
+    #>
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)]$Tab, [Parameter(Mandatory)]$Session)
+
+    $profile = $Tab.Profile
+
+    # The login password, once, at the first password prompt.
+    if ($Tab.Password -and $profile.type -in @('SSH', 'Telnet')) {
+        $Session.AddRule('login-password', '(password|passphrase)[^:\r\n]*:\s*$', ($Tab.Password + "`r"), 200, $true, $true, 90000, $null, $false)
+    }
+
+    # ssh asking about a key it does not know. The pre-flight check normally settles
+    # this first; this is the safety net.
+    if ($profile.type -eq 'SSH' -and -not $profile.ssh.autoAcceptHostKey) {
+        $Session.AddRule('hostkey-prompt', '\(yes/no(/\[fingerprint\])?\)\?', $null, 0, $true, $true, 0, $null, $true)
+    }
+
+    # Entering privileged mode: when the user prompt (ending in >) appears, send the
+    # command, then answer the password prompt that follows.
+    if ($profile.autoEnable.enabled) {
+        $credential = Get-PSTermCredentialById -Store $State.Store -Id ([string]$profile.autoEnable.credentialId)
+        $secret = $null
+        if ($credential) { $secret = Get-PSTermSecret -Root $State.Root -Key ([string]$credential.secretKey) }
+        $command = if ($profile.autoEnable.command) { [string]$profile.autoEnable.command } else { 'enable' }
+        $delay = [int]$profile.autoEnable.delayMs
+
+        $arms = @('enable-password')
+        if ($profile.autoEnable.useUsername -and $credential -and $credential.username) { $arms += 'enable-user' }
+
+        $Session.AddRule('enable-start', '^[\w.\-/()]+>\s*$', ($command + "`r"), $delay, $true, $true, 0, [string[]]$arms, $false)
+        if ($arms -contains 'enable-user') {
+            $Session.AddRule('enable-user', '(user ?name|login)[^:\r\n]*:\s*$', ([string]$credential.username + "`r"), 150, $true, $false, 20000, $null, $false)
+        }
+        if ($null -ne $secret) {
+            $Session.AddRule('enable-password', '(password|passcode)[^:\r\n]*:\s*$', ($secret + "`r"), 150, $true, $false, 20000, $null, $false)
+        }
+    }
 }
 
 function Start-PSTermAutoInput {
@@ -661,7 +1684,7 @@ function Start-PSTermAutoInput {
         freeze the window and stop the terminal painting the very output being
         waited for.
     #>
-    param($Tab, [string[]]$Lines)
+    param($Tab, [string[]]$Lines, [int]$InitialDelayMs = 0)
 
     $queue = New-Object System.Collections.Generic.Queue[string]
     foreach ($line in $Lines) { $queue.Enqueue($line) }
@@ -681,11 +1704,12 @@ function Start-PSTermAutoInput {
             $timer.Dispose()
             return
         }
+        if ($wait.Clock.ElapsedMilliseconds -lt $InitialDelayMs) { return }
 
         $session = $Tab.Session
         $heardSomething = $session.DataChunks -gt $wait.Seen
         $ready = $heardSomething -and ($session.IdleMilliseconds -ge $quietMs)
-        if (-not $ready -and $wait.Clock.ElapsedMilliseconds -lt $giveUpMs) { return }
+        if (-not $ready -and $wait.Clock.ElapsedMilliseconds -lt ($giveUpMs + $InitialDelayMs)) { return }
 
         $session.Send(($queue.Dequeue() + "`r"))
         $wait.Seen = $session.DataChunks
@@ -712,6 +1736,7 @@ function Complete-PSTermTab {
     $State.TabStrip.Invalidate()
     Update-PSTermStatus -State $State
     Set-PSTermStatusMessage -State $State -Message $note
+    Update-PSTermTree -State $State
 }
 
 function Restart-PSTermTab {
@@ -719,18 +1744,19 @@ function Restart-PSTermTab {
     .SYNOPSIS
         Reconnect the active tab using the same profile.
     #>
-    param([Parameter(Mandatory)]$State)
+    param([Parameter(Mandatory)]$State, [int]$Index = -1)
 
-    $tab = Get-PSTermActiveTab -State $State
+    $tab = if ($Index -ge 0) { $State.Tabs | Where-Object { $_.Item -eq $State.TabStrip.Items[$Index] } | Select-Object -First 1 } else { Get-PSTermActiveTab -State $State }
     if (-not $tab) { return }
 
     $profile = $tab.Profile
-    $index = $State.TabStrip.IndexOf($tab.Item)
-    Close-PSTermTab -State $State -Index $index -Force
-    New-PSTermSessionTab -State $State -Profile $profile | Out-Null
+    $temporary = [bool]$tab.Temp
+    $position = $State.TabStrip.IndexOf($tab.Item)
+    Close-PSTermTab -State $State -Index $position -Force
+    [void](New-PSTermSessionTab -State $State -Profile $profile -Temporary:$temporary)
 
     # The new tab is appended; put it back where the old one was.
-    $State.TabStrip.MoveItem($State.TabStrip.Count - 1, [Math]::Min($index, $State.TabStrip.Count - 1))
+    $State.TabStrip.MoveItem($State.TabStrip.Count - 1, [Math]::Min($position, $State.TabStrip.Count - 1))
 }
 
 # =============================================================================
@@ -787,6 +1813,7 @@ function Close-PSTermTab {
     }
 
     if ($tab) {
+        $tab.Closed = $true
         if ($tab.Session) { try { $tab.Session.Dispose() } catch { } }
         if ($tab.Logger) { try { $tab.Logger.Close() } catch { } }
         $State.TabHost.Controls.Remove($tab.Control)
@@ -796,6 +1823,104 @@ function Close-PSTermTab {
 
     $State.TabStrip.RemoveAt($Index)
     Show-PSTermTabContent -State $State
+    if ($State.Tree) { Update-PSTermTree -State $State }
+}
+
+function Close-PSTermTabs {
+    <#
+    .SYNOPSIS
+        Close several tabs after a single confirmation.
+    #>
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)][int[]]$Indexes)
+
+    $live = 0
+    foreach ($i in $Indexes) {
+        $item = $State.TabStrip.Items[$i]
+        $tab = $State.Tabs | Where-Object { $_.Item -eq $item } | Select-Object -First 1
+        if ($tab -and -not $tab.Closed) { $live++ }
+    }
+    if ($live -gt 0) {
+        $answer = Show-PSTermMessage -Theme $State.Theme -Owner $State.Form -Title 'Close sessions' -Buttons YesNo `
+            -Message "$live session(s) are still connected. Close them?"
+        if ($answer -ne 'Yes') { return }
+    }
+    foreach ($i in ($Indexes | Sort-Object -Descending)) { Close-PSTermTab -State $State -Index $i -Force }
+}
+
+function Show-PSTermTabContext {
+    param([Parameter(Mandatory)]$State, [int]$Index, [System.Drawing.Point]$Location)
+
+    $menu = New-PSTermMenu -Theme $State.Theme
+    $count = $State.TabStrip.Count
+
+    if ($Index -lt 0) {
+        [void](Add-PSTermMenuItem $menu 'New connection...' { Invoke-PSTermNewConnection -State $State }.GetNewClosure())
+        [void](Add-PSTermMenuItem $menu 'Close all tabs' { Close-PSTermTabs -State $State -Indexes @(0..($count - 1)) }.GetNewClosure() 'Close every session.' ($count -gt 0))
+        $menu.Show($Location)
+        return
+    }
+
+    $item = $State.TabStrip.Items[$Index]
+    $tab = $State.Tabs | Where-Object { $_.Item -eq $item } | Select-Object -First 1
+    if (-not $tab) { return }
+
+    [void](Add-PSTermMenuItem $menu 'Reconnect' { Restart-PSTermTab -State $State -Index $Index }.GetNewClosure() 'Close this session and connect again with the same settings.')
+    [void](Add-PSTermMenuItem $menu 'Duplicate tab' { [void](New-PSTermSessionTab -State $State -Profile $tab.Profile -Temporary:([bool]$tab.Temp)) }.GetNewClosure() 'Open another session to the same device.')
+    [void](Add-PSTermMenuItem $menu 'Rename tab...' { Invoke-PSTermRenameTab -State $State -Tab $tab }.GetNewClosure() 'Change this tab''s title. The connection keeps its name.')
+
+    $mark = $menu.Items.Add('Mark')
+    $mark.ToolTipText = 'Colour the tab to flag how important it is.'
+    $mark.DropDown.Renderer = $menu.Renderer
+    $mark.DropDown.BackColor = $State.Theme.Surface
+    $mark.DropDown.ForeColor = $State.Theme.Text
+    $none = $mark.DropDownItems.Add('No mark')
+    $none.Add_Click({ Set-PSTermTabMark -State $State -Tab $tab -Name '' }.GetNewClosure())
+    foreach ($name in $script:PSTermMarkColours.Keys) {
+        $colourName = $name
+        $entry = $mark.DropDownItems.Add($colourName)
+        $swatch = New-Object System.Drawing.Bitmap(14, 14)
+        $g = [System.Drawing.Graphics]::FromImage($swatch)
+        $g.Clear($script:PSTermMarkColours[$colourName]); $g.Dispose()
+        $entry.Image = $swatch
+        $entry.Checked = ([string]$tab.Profile.mark -eq $colourName)
+        $entry.Add_Click({ Set-PSTermTabMark -State $State -Tab $tab -Name $colourName }.GetNewClosure())
+    }
+
+    [void]$menu.Items.Add('-')
+    [void](Add-PSTermMenuItem $menu 'Clear scrollback' { $tab.Control.ClearScrollback() }.GetNewClosure())
+    [void](Add-PSTermMenuItem $menu 'Edit connection...' {
+        $stored = Get-PSTermProfileById -Store $State.Store -Id ([string]$tab.Profile.id)
+        if ($stored) { [void](Invoke-PSTermEditProfile -State $State -Profile $stored) }
+    }.GetNewClosure() 'Change the saved settings. They apply the next time you connect.' (-not $tab.Temp))
+    [void]$menu.Items.Add('-')
+    [void](Add-PSTermMenuItem $menu 'Close' { Close-PSTermTab -State $State -Index $Index }.GetNewClosure())
+    [void](Add-PSTermMenuItem $menu 'Close other tabs' {
+        Close-PSTermTabs -State $State -Indexes @(0..($count - 1) | Where-Object { $_ -ne $Index })
+    }.GetNewClosure() '' ($count -gt 1))
+    [void](Add-PSTermMenuItem $menu 'Close tabs to the right' {
+        Close-PSTermTabs -State $State -Indexes @(($Index + 1)..($count - 1))
+    }.GetNewClosure() '' ($Index -lt ($count - 1)))
+    $menu.Show($Location)
+}
+
+function Set-PSTermTabMark {
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)]$Tab, [string]$Name)
+
+    $Tab.Item.Mark = if ($Name) { $script:PSTermMarkColours[$Name] } else { [System.Drawing.Color]::Empty }
+    $Tab.Profile.mark = $Name
+    $stored = Get-PSTermProfileById -Store $State.Store -Id ([string]$Tab.Profile.id)
+    if ($stored) { $stored.mark = $Name; Save-PSTermProfiles -Root $State.Root -Store $State.Store }
+    $State.TabStrip.Invalidate()
+}
+
+function Invoke-PSTermRenameTab {
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)]$Tab)
+    $answer = Show-PSTermInputDialog -State $State -Title 'Rename tab' -Prompt 'Title for this tab:' -Value ([string]$Tab.Item.Title)
+    if (-not $answer -or -not $answer.Value.Trim()) { return }
+    $Tab.Item.Title = $answer.Value.Trim()
+    $Tab.CustomTitle = $true
+    $State.TabStrip.Invalidate()
+    Update-PSTermStatus -State $State
 }
 
 function Confirm-PSTermClose {
@@ -839,6 +1964,19 @@ function Update-PSTermStatus {
     param([Parameter(Mandatory)]$State)
 
     $tab = Get-PSTermActiveTab -State $State
+    $ribbon = $State.Ribbon
+
+    # The toolbar enables what the current tab can do.
+    if ($ribbon) {
+        $has = [bool]$tab
+        $live = $has -and -not $tab.Closed
+        $serial = $has -and $tab.Profile.type -eq 'Serial' -and $live
+        foreach ($key in 'reconnect', 'duplicate', 'close', 'paste', 'selectall', 'find', 'clear', 'reset') { $ribbon.SetEnabled($key, $has) }
+        $ribbon.SetEnabled('copy', ($has -and $tab.Control.HasSelection))
+        $ribbon.SetEnabled('break', $serial)
+        $ribbon.SetEnabled('creds', $live)
+    }
+
     if (-not $tab) {
         $State.StatusRight.Text = ''
         $State.Form.Text = 'PSTerm'
@@ -869,6 +2007,18 @@ function Invoke-PSTermShortcut {
     $ctrl = $EventArgs.Control
     $shift = $EventArgs.Shift
     $alt = $EventArgs.Alt
+
+    # Ctrl+B toggles the session list. It has no use in a terminal that Ctrl+Shift
+    # does not cover, but plain Ctrl+letter belongs to the device, so it is only
+    # claimed when focus is not in a terminal (where ^B is cursor-left on a shell).
+    if ($ctrl -and -not $shift -and -not $alt -and $EventArgs.KeyCode -eq [System.Windows.Forms.Keys]::B) {
+        $focused = $State.Form.ActiveControl
+        if (-not ($focused -is [PSTerm.Render.TerminalControl])) {
+            $EventArgs.SuppressKeyPress = $true
+            Set-PSTermSidebar -State $State -Toggle
+            return
+        }
+    }
 
     # Application commands live on Ctrl+Shift, the way Windows Terminal does it.
     # Plain Ctrl+letter belongs to the device: Ctrl+R is reverse search, Ctrl+W

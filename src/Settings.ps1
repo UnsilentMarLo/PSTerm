@@ -25,6 +25,14 @@ function New-PSTermDefaultSettings {
         # Where a brand-new profile starts, so house style only has to be set once.
         defaultBackspace = 'Delete'
         defaultEncoding  = 'Utf8'
+        # Used when a connection (and its folder) names no SSH user. Empty means
+        # ask, which is safer than letting ssh quietly use the Windows account name.
+        defaultSshUser   = ''
+        # Offer serial ports in the session list as soon as an adapter is plugged in.
+        detectSerialPorts = $true
+        detectedPortBaud = 9600
+        sidebarVisible   = $true
+        sidebarWidth     = 310
     }
 }
 

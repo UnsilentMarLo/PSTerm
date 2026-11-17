@@ -54,18 +54,61 @@ put on a share or a USB stick.
 
 **Interface**
 
-- Tabs with a close button and a connection-state dot.
+- A toolbar with icons and captions, grouped like a Word ribbon: new, reconnect,
+  duplicate, close; copy, paste, select all; find, clear scrollback, reset
+  terminal, serial break; quick credentials; import and export; the session list
+  and the theme. Every button and every field has a tooltip.
+- Tabs with a close button, a connection-state dot, a `+` that opens the connection
+  editor, and a **colour mark** (right-click a tab) to flag how important it is.
 - Quick-connect bar: type `admin@switch1`, `host:2222`, `telnet ts1 2004`,
   `COM3:115200` or `cmd` and press Enter.
 - Command palette on `Ctrl+Shift+P`.
-- Session tree with **folders** and a search box.
-- Import from the PuTTY registry and from `~/.ssh/config`.
-- Dark and light themes; DPI-aware at any display scaling.
+- Session tree with **folders and subfolders**, a search box, a **Pinned** section,
+  drag and drop (connections into folders, folders into folders, onto Pinned), a
+  chevron that folds with one click, and right-click menus on folders, connections,
+  tabs and the empty list. Hover a folder for `+` (new connection in it) and a
+  connection for its pin.
+- `<` at the left of the top bar (or `Ctrl+B`) folds the session list away.
+- **Folder settings**: right-click a folder. Every new connection created in it
+  starts with that folder's user, password, ports, terminal, logging and
+  auto-enable settings. Existing connections are not rewritten.
+- **Serial ports appear by themselves**: plug in a console cable and its COM port is
+  listed under *Detected serial ports*, with the adapter's name; double-click to open
+  it. Nothing is saved unless you choose *Save as connection*.
+- Import from a **CSV file** (a NetBox IP export works as it is, German headers
+  included), from a PSTerm `.psterm` session file, from the PuTTY registry and from
+  `~/.ssh/config`. Export a connection, a folder or everything to a `.psterm` file to
+  back it up or share it - passwords are never included.
+- Dark and light themes, with matching title bars; DPI-aware at any display scaling.
+
+**Logging in**
+
+- **SSH user**: never guessed. A connection with no user (and no folder or global
+  default) asks for one, instead of letting `ssh` quietly send your Windows account
+  name to the device.
+- **Password** on a connection or a folder, with Show/Hide. It is stored encrypted
+  with DPAPI for your Windows account (`Profiles\credentials.dat`), never in
+  `profiles.json`, and typed once at the first password prompt - a wrong one is not
+  retried, so it cannot lock the account out.
+- **Host keys** are asked about in a dialog with the fingerprints, before the session
+  starts, not at a `yes/no` prompt inside the terminal. *Accept new host keys
+  automatically* (per connection or per folder) skips the question; a key that later
+  *changes* is still refused.
+- **Quick credentials** (toolbar): named secrets, with an optional user name, that
+  you can send into the terminal with one click - an enable password, say.
+- **Auto-enable**: when the device shows its `>` prompt, send `enable` (or any
+  command) after a delay and answer the password prompt - and the user name prompt,
+  if the device asks for one - from a quick credential.
+- **Names fill themselves in**: enter only an IP address and leave the name as it is;
+  PSTerm names the connection from a reverse DNS lookup, or failing that from the
+  device's own prompt once it has connected.
 
 **Logging**
 
-Per-line timestamps, raw or plain text, size-based rotation (`name.1.log`,
-`name.2.log`...), and templated paths
+Plain-text logs are what was on the screen: a device that draws and then erases
+text - Cisco's `--More--` is the classic - leaves no debris, and the key that
+answers the pager is left out too. Per-line timestamps, raw or plain text,
+size-based rotation (`name.1.log`, `name.2.log`...), and templated paths
 so every device writes its own dated file with no per-session setup:
 
 ```
@@ -108,6 +151,8 @@ the above are present.
 | `Ctrl+Shift+1`…`9` | Go to tab |
 | `Ctrl+Shift+C` / `Ctrl+Shift+V` | Copy and paste |
 | `Shift+PgUp` / `Shift+PgDn` | Scroll back |
+| `Ctrl+B` | Show or hide the session list (outside a terminal) |
+| Right-click in a terminal | Copy the selection, or paste when nothing is selected |
 
 Application commands sit on `Ctrl+Shift`. Everything else - Escape, function keys,
 Alt, and every plain `Ctrl` combination (`Ctrl+R` reverse search, `Ctrl+W`, `Ctrl+L`,

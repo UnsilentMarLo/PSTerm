@@ -91,6 +91,7 @@ function New-PSTermControlTheme {
     $ct.Accent       = $Theme.Accent
     $ct.AccentText   = $Theme.AccentText
     $ct.Selection    = $Theme.Selection
+    $ct.Success      = $Theme.Success
     $ct.IsDark       = ($Theme.Mode -eq 'Dark')
     $ct
 }
@@ -151,6 +152,26 @@ function Get-PSTermScale {
     [PSTerm.Render.NativeTheme]::GetScale($font)
 }
 
+function Set-PSTermAppChrome {
+    <#
+    .SYNOPSIS
+        Give every window the application's icon and title-bar colours.
+    .DESCRIPTION
+        Dialogs are ThemedForms and take both from shared settings when their
+        window is created, so nothing has to be repeated per dialog. Forms that are
+        already open are updated too, which is what a theme change needs.
+    #>
+    param([Parameter(Mandatory)]$Theme, [string]$Root)
+
+    if ($Root -and -not [PSTerm.Render.ThemedForm]::AppIcon) {
+        $iconPath = Join-Path $Root 'src\icon.ico'
+        if (Test-Path -LiteralPath $iconPath) {
+            try { [PSTerm.Render.ThemedForm]::AppIcon = New-Object System.Drawing.Icon($iconPath) } catch { }
+        }
+    }
+    [PSTerm.Render.NativeTheme]::ApplyTitleBars(($Theme.Mode -eq 'Dark'), $Theme.Surface, $Theme.Text)
+}
+
 function Set-PSTermTitleBarTheme {
     param(
         [Parameter(Mandatory)][System.Windows.Forms.Form]$Form,
@@ -178,7 +199,22 @@ function Set-PSTermFormTheme {
     if ($Control -is [PSTerm.Render.TerminalControl]) { return }
     if (-not $ControlTheme) { $ControlTheme = New-PSTermControlTheme -Theme $Theme }
 
+    # Field grids are built with layout suspended (every added row would otherwise
+    # re-run the auto-size layout); this is the first point every dialog passes
+    # through once it is complete.
+    if ($Control -is [System.Windows.Forms.TableLayoutPanel]) { $Control.ResumeLayout($true) }
+
     switch ($true) {
+        ($Control -is [PSTerm.Render.FieldFrame]) {
+            # The frame themes its own text box; only the placeholder colour is ours.
+            $Control.ApplyTheme($ControlTheme)
+            $Control.Input.ForeColor = $(if (Test-PSTermPlaceholderActive -TextBox $Control.Input) { $Theme.TextMuted } else { $Theme.Text })
+            return
+        }
+        ($Control -is [PSTerm.Render.RibbonBar]) {
+            $Control.ApplyTheme($ControlTheme)
+            return
+        }
         ($Control -is [PSTerm.Render.ThemedComboBox]) {
             $Control.ApplyTheme($ControlTheme)
         }

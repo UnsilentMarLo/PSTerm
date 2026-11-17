@@ -42,6 +42,7 @@ namespace PSTerm.Render
         public Color Accent = Color.FromArgb(91, 174, 255);
         public Color AccentText = Color.FromArgb(16, 18, 22);
         public Color Selection = Color.FromArgb(47, 79, 127);
+        public Color Success = Color.FromArgb(108, 223, 108);
         public bool IsDark = true;
     }
 
@@ -85,12 +86,42 @@ namespace PSTerm.Render
             }
         }
 
+        /// <summary>
+        /// Whether title bars are drawn dark. Set once from the application theme;
+        /// every ThemedForm - dialogs, message boxes, the palette - picks it up when
+        /// its window is created, so no dialog has to remember to ask for it. Asking
+        /// from the Shown event, as the dialogs used to, is too late: the frame has
+        /// been drawn by then and Windows leaves it light.
+        /// </summary>
+        public static bool DarkTitleBars = false;
+
+        /// <summary>Caption colours for Windows 11, which can colour the bar itself.</summary>
+        public static Color CaptionBack = Color.Empty;
+        public static Color CaptionText = Color.Empty;
+
+        /// <summary>The application icon, copied onto every form so no window shows
+        /// the default one.</summary>
+        public static Icon AppIcon = null;
+
         public ThemedForm()
         {
             // Sizes are computed from the UI font, so WinForms must not apply a
             // second scaling pass of its own on top.
             AutoScaleMode = AutoScaleMode.None;
             Font = NativeTheme.GetUiFont();
+
+            if (AppIcon != null)
+            {
+                try { Icon = (Icon)AppIcon.Clone(); }
+                catch (Exception) { }
+            }
+        }
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            NativeTheme.SetDarkTitleBar(this, DarkTitleBars);
+            NativeTheme.SetCaptionColors(this, CaptionBack, CaptionText);
         }
 
         /// <summary>Ask the desktop window manager for a dark title bar.</summary>
@@ -287,11 +318,17 @@ namespace PSTerm.Render
         protected override void OnPaint(PaintEventArgs e)
         {
             Graphics g = e.Graphics;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
 
+            // The background is filled with smoothing off. With anti-aliasing on, the
+            // edge pixels of the rectangle are only part covered and blend with the
+            // empty double buffer, which drew a dark line along the top and left of
+            // every check box.
+            g.SmoothingMode = SmoothingMode.None;
             Color parentBack = (Parent != null) ? Parent.BackColor : _theme.Background;
             using (SolidBrush brush = new SolidBrush(parentBack))
                 g.FillRectangle(brush, ClientRectangle);
+
+            g.SmoothingMode = SmoothingMode.AntiAlias;
 
             int size = BoxSize;
             Rectangle box = new Rectangle(1, (Height - size) / 2, size, size);
@@ -335,216 +372,6 @@ namespace PSTerm.Render
             {
                 using (Pen pen = new Pen(_theme.BorderStrong) { DashStyle = DashStyle.Dot })
                     g.DrawRectangle(pen, textBounds.Left - 2, 1, textBounds.Width, Height - 3);
-            }
-        }
-    }
-
-    // =========================================================================
-    // Tree view
-    // =========================================================================
-
-    /// <summary>
-    /// A tree drawn in theme colours.
-    /// </summary>
-    /// <remarks>
-    /// TreeView paints its selection highlight, expander glyphs and scroll bars
-    /// with the system visual style and ignores BackColor, so a dark panel ends
-    /// up with a white selection bar and a white scroll bar. Everything inside
-    /// the client area is drawn here; the horizontal scroll bar is suppressed
-    /// outright with TVS_NOHSCROLL and long labels are ellipsised instead, which
-    /// is better behaviour for a session list anyway.
-    /// </remarks>
-    public class ThemedTreeView : TreeView
-    {
-        private const int TVS_NOHSCROLL = 0x8000;
-
-        private ControlTheme _theme = new ControlTheme();
-        private TreeNode _hotNode;
-
-        /// <summary>
-        /// Pixels at the right that are clipped from view.
-        /// </summary>
-        /// <remarks>
-        /// The host makes this control wider than its container so the system
-        /// vertical scroll bar, which cannot be themed, falls outside the clip.
-        /// Text has to be laid out against the visible edge or the ellipsis is
-        /// placed off-screen and labels simply end mid-word.
-        /// </remarks>
-        public int RightInset = 0;
-
-        public ThemedTreeView()
-        {
-            DrawMode = TreeViewDrawMode.OwnerDrawAll;
-            FullRowSelect = true;
-            HideSelection = false;
-            ShowLines = false;
-            ShowRootLines = false;
-            ShowPlusMinus = true;      // keeps the native hit-test for the expander
-            BorderStyle = BorderStyle.None;
-            SetStyle(ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
-        }
-
-        protected override CreateParams CreateParams
-        {
-            get
-            {
-                CreateParams cp = base.CreateParams;
-                cp.Style |= TVS_NOHSCROLL;
-                return cp;
-            }
-        }
-
-        public void ApplyTheme(ControlTheme theme)
-        {
-            if (theme == null) return;
-            _theme = theme;
-            BackColor = theme.Surface;
-            ForeColor = theme.Text;
-            LineColor = theme.Border;
-            Invalidate();
-        }
-
-        protected override void OnMouseMove(MouseEventArgs e)
-        {
-            base.OnMouseMove(e);
-            TreeNode node = GetNodeAt(0, e.Y);
-            if (!ReferenceEquals(node, _hotNode))
-            {
-                _hotNode = node;
-                Invalidate();
-            }
-        }
-
-        protected override void OnMouseLeave(EventArgs e)
-        {
-            base.OnMouseLeave(e);
-            if (_hotNode != null) { _hotNode = null; Invalidate(); }
-        }
-
-        protected override void OnDrawNode(DrawTreeNodeEventArgs e)
-        {
-            e.DrawDefault = false;
-
-            if (e.Node == null || e.Bounds.Height <= 0) return;
-
-            // Full-width row, so selection spans the panel rather than hugging
-            // the text the way the default drawing does.
-            Rectangle row = new Rectangle(0, e.Bounds.Top, Width - RightInset, e.Bounds.Height);
-
-            bool selected = (e.State & TreeNodeStates.Selected) != 0;
-            bool hot = ReferenceEquals(e.Node, _hotNode);
-            bool isFolder = (e.Node.Tag == null);
-
-            Color back = selected ? _theme.Selection : (hot ? _theme.FieldHover : _theme.Surface);
-            using (SolidBrush brush = new SolidBrush(back))
-                e.Graphics.FillRectangle(brush, row);
-
-            int indent = Indent * e.Node.Level;
-            int glyphSize = Math.Max(8, e.Bounds.Height / 2);
-            int textLeft = indent + Indent;
-
-            if (e.Node.Nodes.Count > 0)
-            {
-                DrawExpander(e.Graphics,
-                    new Rectangle(indent + (Indent - glyphSize) / 2,
-                                  e.Bounds.Top + (e.Bounds.Height - glyphSize) / 2,
-                                  glyphSize, glyphSize),
-                    e.Node.IsExpanded,
-                    selected ? _theme.Text : _theme.TextMuted);
-            }
-
-            // A folder is a heading, so it is muted; a connection is the thing
-            // the operator is actually looking for.
-            Color fore = selected ? _theme.Text : (isFolder ? _theme.TextMuted : _theme.Text);
-
-            int visibleRight = Width - RightInset;
-            Rectangle textBounds = new Rectangle(
-                textLeft, e.Bounds.Top, Math.Max(10, visibleRight - textLeft - 8), e.Bounds.Height);
-
-            TextRenderer.DrawText(e.Graphics, e.Node.Text, Font, textBounds, fore,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
-                TextFormatFlags.NoPrefix | TextFormatFlags.EndEllipsis);
-        }
-
-        private static void DrawExpander(Graphics g, Rectangle bounds, bool expanded, Color colour)
-        {
-            SmoothingMode saved = g.SmoothingMode;
-            g.SmoothingMode = SmoothingMode.AntiAlias;
-
-            float cx = bounds.Left + bounds.Width / 2f;
-            float cy = bounds.Top + bounds.Height / 2f;
-            float r = bounds.Width * 0.26f;
-
-            using (Pen pen = new Pen(colour, Math.Max(1.3f, bounds.Width / 9f)))
-            {
-                pen.StartCap = LineCap.Round;
-                pen.EndCap = LineCap.Round;
-                pen.LineJoin = LineJoin.Round;
-
-                if (expanded)
-                {
-                    g.DrawLines(pen, new PointF[] {
-                        new PointF(cx - r, cy - r * 0.5f),
-                        new PointF(cx,     cy + r * 0.5f),
-                        new PointF(cx + r, cy - r * 0.5f)
-                    });
-                }
-                else
-                {
-                    g.DrawLines(pen, new PointF[] {
-                        new PointF(cx - r * 0.5f, cy - r),
-                        new PointF(cx + r * 0.5f, cy),
-                        new PointF(cx - r * 0.5f, cy + r)
-                    });
-                }
-            }
-
-            g.SmoothingMode = saved;
-        }
-
-        // ---- scrolling ------------------------------------------------------
-        // The vertical scroll bar is a system control that cannot be themed, so
-        // the host clips it out of view and drives these instead.
-
-        /// <summary>Number of rows currently on show, counting expanded children.</summary>
-        public int VisibleNodeCount
-        {
-            get
-            {
-                int count = 0;
-                TreeNode node = (Nodes.Count > 0) ? Nodes[0] : null;
-                while (node != null) { count++; node = node.NextVisibleNode; }
-                return count;
-            }
-        }
-
-        /// <summary>Rows that fit in the client area.</summary>
-        public int RowsPerPage
-        {
-            get
-            {
-                int rowHeight = Math.Max(1, ItemHeight);
-                return Math.Max(1, ClientSize.Height / rowHeight);
-            }
-        }
-
-        public int TopNodeIndex
-        {
-            get
-            {
-                TreeNode top = TopNode;
-                if (top == null) return 0;
-                int index = 0;
-                TreeNode node = (Nodes.Count > 0) ? Nodes[0] : null;
-                while (node != null && !ReferenceEquals(node, top)) { index++; node = node.NextVisibleNode; }
-                return index;
-            }
-            set
-            {
-                int target = Math.Max(0, value);
-                TreeNode node = (Nodes.Count > 0) ? Nodes[0] : null;
-                for (int i = 0; i < target && node != null; i++) node = node.NextVisibleNode;
-                if (node != null) TopNode = node;
             }
         }
     }
@@ -953,6 +780,13 @@ namespace PSTerm.Render
             return scale;
         }
 
+        private const int DWMWA_CAPTION_COLOR = 35;
+        private const int DWMWA_TEXT_COLOR = 36;
+        private const int DWMWA_BORDER_COLOR = 34;
+
+        [DllImport("user32.dll")]
+        private static extern bool SetWindowPos(IntPtr hWnd, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
         public static void SetDarkTitleBar(Form form, bool dark)
         {
             if (form == null || !form.IsHandleCreated) return;
@@ -964,6 +798,53 @@ namespace PSTerm.Render
             }
             catch (DllNotFoundException) { }
             catch (EntryPointNotFoundException) { }
+            RefreshFrame(form);
+        }
+
+        /// <summary>
+        /// Colour the caption itself (Windows 11 build 22000 and later). Earlier
+        /// builds ignore the attribute and keep the plain dark or light bar. Passing
+        /// Color.Empty puts the system colour back.
+        /// </summary>
+        public static void SetCaptionColors(Form form, Color back, Color text)
+        {
+            if (form == null || !form.IsHandleCreated) return;
+            try
+            {
+                int def = unchecked((int)0xFFFFFFFF);          // DWMWA_COLOR_DEFAULT
+                int b = back.IsEmpty ? def : (back.R | (back.G << 8) | (back.B << 16));
+                int t = text.IsEmpty ? def : (text.R | (text.G << 8) | (text.B << 16));
+                DwmSetWindowAttribute(form.Handle, DWMWA_CAPTION_COLOR, ref b, sizeof(int));
+                DwmSetWindowAttribute(form.Handle, DWMWA_TEXT_COLOR, ref t, sizeof(int));
+                DwmSetWindowAttribute(form.Handle, DWMWA_BORDER_COLOR, ref b, sizeof(int));
+            }
+            catch (DllNotFoundException) { }
+            catch (EntryPointNotFoundException) { }
+            RefreshFrame(form);
+        }
+
+        /// <summary>Make Windows redraw the frame, so a change to an open window shows.</summary>
+        private static void RefreshFrame(Form form)
+        {
+            // SWP_NOMOVE | NOSIZE | NOZORDER | NOACTIVATE | FRAMECHANGED
+            try { SetWindowPos(form.Handle, IntPtr.Zero, 0, 0, 0, 0, 0x0001 | 0x0002 | 0x0004 | 0x0010 | 0x0020); }
+            catch (Exception) { }
+        }
+
+        /// <summary>
+        /// Apply the application's title-bar look to every open form. Called when the
+        /// theme changes.
+        /// </summary>
+        public static void ApplyTitleBars(bool dark, Color back, Color text)
+        {
+            ThemedForm.DarkTitleBars = dark;
+            ThemedForm.CaptionBack = back;
+            ThemedForm.CaptionText = text;
+            foreach (Form form in Application.OpenForms)
+            {
+                SetDarkTitleBar(form, dark);
+                SetCaptionColors(form, back, text);
+            }
         }
 
         /// <summary>

@@ -22,6 +22,7 @@ Initialize-PSTermCore -Root $root
 . (Join-Path $root 'src\Settings.ps1')
 . (Join-Path $root 'src\Secrets.ps1')
 . (Join-Path $root 'src\Profiles.ps1')
+. (Join-Path $root 'src\Store.ps1')
 . (Join-Path $root 'src\Connect.ps1')
 
 $script:Passed = 0
@@ -446,6 +447,182 @@ Test-Case 'key encoder settings come from the profile' {
     $encoder = New-PSTermKeyEncoder -Profile $p
     Assert-Equal ([PSTerm.Vt.BackspaceMode]::Backspace) $encoder.Settings.Backspace
     Assert-Equal ([PSTerm.Vt.FunctionKeyMode]::Vt220) $encoder.Settings.FunctionKeys
+}
+
+# ------------------------------------------------- folders, pins, creds -----
+
+Write-Host "`nFolders, pins and credentials" -ForegroundColor Yellow
+
+function New-TestStore {
+    [pscustomobject]@{ version = 2; folders = @(); pinned = @(); credentials = @(); profiles = @() }
+}
+
+Test-Case 'a new connection in a folder starts from the folder defaults' {
+    $store = New-TestStore
+    $rec = Add-PSTermFolder -Store $store -Path 'Lab/Switches'
+    $d = New-PSTermProfile
+    $d.ssh.user = 'netadmin'; $d.ssh.port = 2222; $d.ssh.autoAcceptHostKey = $true
+    $d.terminal.backspace = 'Backspace'; $d.autoEnable.enabled = $true; $d.autoEnable.delayMs = 900
+    $rec.defaults = $d
+    $p = New-PSTermProfileInFolder -Store $store -Folder 'Lab/Switches/Floor1'
+    Assert-Equal 'netadmin' $p.ssh.user
+    Assert-Equal 2222 $p.ssh.port
+    Assert-True $p.ssh.autoAcceptHostKey 'auto-accept was not inherited'
+    Assert-Equal 'Backspace' $p.terminal.backspace
+    Assert-Equal 900 $p.autoEnable.delayMs
+    Assert-Equal '' $p.ssh.host 'the address must not be inherited'
+    Assert-Equal 'Lab/Switches/Floor1' $p.folder
+}
+
+Test-Case 'changing folder defaults later does not rewrite existing connections' {
+    $store = New-TestStore
+    $rec = Add-PSTermFolder -Store $store -Path 'A'
+    $rec.defaults = New-PSTermProfile; $rec.defaults.ssh.user = 'one'
+    $p = New-PSTermProfileInFolder -Store $store -Folder 'A'
+    $rec.defaults.ssh.user = 'two'
+    Assert-Equal 'one' $p.ssh.user
+}
+
+Test-Case 'folder defaults survive a save and load' {
+    $store = New-TestStore
+    $rec = Add-PSTermFolder -Store $store -Path 'Core'
+    $rec.defaults = New-PSTermProfile; $rec.defaults.ssh.user = 'ops'
+    Save-PSTermProfiles -Root $sandbox -Store $store
+    $loaded = Import-PSTermProfiles -Root $sandbox
+    $found = Get-PSTermFolderRecord -Store $loaded -Path 'Core'
+    Assert-Equal 'ops' $found.defaults.ssh.user
+}
+
+Test-Case 'renaming a folder moves its subfolders and connections' {
+    $store = New-TestStore
+    [void](Add-PSTermFolder -Store $store -Path 'Lab/Switches')
+    $p = New-PSTermProfile -Name 'sw1'; $p.folder = 'Lab/Switches'
+    [void](Set-PSTermProfile -Store $store -Profile $p)
+    [void](Rename-PSTermFolder -Store $store -OldPath 'Lab' -NewPath 'Site A')
+    Assert-Equal 'Site A/Switches' $p.folder
+    Assert-True ($null -ne (Get-PSTermFolderRecord -Store $store -Path 'Site A/Switches')) 'subfolder record not moved'
+    Assert-True ($null -eq (Get-PSTermFolderRecord -Store $store -Path 'Lab')) 'old record left behind'
+}
+
+Test-Case 'a folder cannot be moved into itself' {
+    $store = New-TestStore
+    [void](Add-PSTermFolder -Store $store -Path 'A')
+    Assert-True (-not (Rename-PSTermFolder -Store $store -OldPath 'A' -NewPath 'A/B')) 'moved into itself'
+}
+
+Test-Case 'deleting a folder moves its connections up unless told otherwise' {
+    $store = New-TestStore
+    [void](Add-PSTermFolder -Store $store -Path 'A/B')
+    $p = New-PSTermProfile -Name 'x'; $p.folder = 'A/B'
+    [void](Set-PSTermProfile -Store $store -Profile $p)
+    [void](Remove-PSTermFolder -Store $store -Path 'A/B')
+    Assert-Equal 'A' $p.folder
+    $deleted = Remove-PSTermFolder -Store $store -Path 'A' -DeleteContents
+    Assert-Equal 1 @($deleted).Count
+    Assert-Equal 0 @($store.profiles).Count
+}
+
+Test-Case 'pinning and unpinning' {
+    $store = New-TestStore
+    Set-PSTermPinned -Store $store -Id 'a'
+    Set-PSTermPinned -Store $store -Id 'b'
+    Set-PSTermPinned -Store $store -Id 'a'
+    Assert-Equal 2 @($store.pinned).Count 'pinning twice duplicated'
+    Set-PSTermPinned -Store $store -Id 'a' -Pinned $false
+    Assert-True (-not (Test-PSTermPinned -Store $store -Id 'a')) 'still pinned'
+    Assert-True (Test-PSTermPinned -Store $store -Id 'b') 'b lost'
+}
+
+Test-Case 'a quick credential keeps its secret out of the store and can be renamed without retyping it' {
+    $store = New-TestStore
+    $c = Set-PSTermCredential -Store $store -Root $sandbox -Name 'enable' -Secret 'hunter2'
+    Assert-True (-not (($store | ConvertTo-Json -Depth 6) -match 'hunter2')) 'secret found in the store'
+    Assert-Equal 'hunter2' (Get-PSTermSecret -Root $sandbox -Key $c.secretKey)
+    [void](Set-PSTermCredential -Store $store -Root $sandbox -Id $c.id -Name 'enable-lab' -Secret '')
+    Assert-Equal 'hunter2' (Get-PSTermSecret -Root $sandbox -Key $c.secretKey) 'blank secret overwrote the stored one'
+    Assert-Equal 'enable-lab' (Get-PSTermCredentialById -Store $store -Id $c.id).name
+}
+
+Test-Case 'login falls back from the connection to its folder' {
+    $store = New-TestStore
+    $rec = Add-PSTermFolder -Store $store -Path 'Site'
+    $rec.defaults = New-PSTermProfile
+    $rec.defaults.ssh.user = 'folderuser'
+    $rec.defaults.credentialKey = 'folder:Site'
+    [void](Set-PSTermSecret -Root $sandbox -Key 'folder:Site' -Value 'folderpw')
+    $p = New-PSTermProfile; $p.folder = 'Site/Floor'
+    $login = Resolve-PSTermLogin -Store $store -Root $sandbox -Profile $p
+    Assert-Equal 'folderuser' $login.User
+    Assert-Equal 'folderpw' $login.Password
+    $p.ssh.user = 'mine'
+    Assert-Equal 'mine' (Resolve-PSTermLogin -Store $store -Root $sandbox -Profile $p).User
+}
+
+# --------------------------------------------------------- csv import -------
+
+Write-Host "`nCSV and session files" -ForegroundColor Yellow
+
+$netbox = Join-Path $root 'docs\netbox_IP-Adressen.csv'
+
+Test-Case 'a NetBox export is read and its columns recognised' {
+    if (-not (Test-Path -LiteralPath $netbox)) { return }
+    $csv = Read-PSTermCsv -Path $netbox
+    Assert-True ($csv.Rows.Count -gt 50) "rows: $($csv.Rows.Count)"
+    $guess = Get-PSTermCsvGuess -Columns $csv.Columns
+    Assert-Equal 'IP-Adresse' $guess.Host
+    Assert-Equal 'DNS-Name' $guess.Name
+    Assert-Equal 'Beschreibung' $guess.Notes
+}
+
+Test-Case 'CSV rows become connections: prefix length stripped, models become subfolders' {
+    if (-not (Test-Path -LiteralPath $netbox)) { return }
+    $store = New-TestStore
+    $csv = Read-PSTermCsv -Path $netbox
+    $guess = Get-PSTermCsvGuess -Columns $csv.Columns
+    $mapping = @{ Host = $guess.Host; Name = $guess.Name; Notes = $guess.Notes; Folder = '' }
+    $profiles = @(ConvertFrom-PSTermCsvRows -Store $store -Rows $csv.Rows -Mapping $mapping -BaseFolder 'NetBox' -GroupBy 'Beschreibung' -StripPrefixLength)
+    Assert-Equal $csv.Rows.Count $profiles.Count
+    $first = $profiles[0]
+    Assert-Equal '10.20.81.50' $first.ssh.host
+    Assert-Equal 'sb-0.501' $first.name
+    Assert-Equal 'NetBox/Catalyst 3560-CX' $first.folder
+    Assert-True (-not $first.autoName) 'a named device should keep its name'
+}
+
+Test-Case 'a CSV row without a name is named by its address and flagged for automatic naming' {
+    $store = New-TestStore
+    $rows = @([pscustomobject]@{ ip = '10.1.1.5/24'; dns = '' })
+    $p = @(ConvertFrom-PSTermCsvRows -Store $store -Rows $rows -Mapping @{ Host = 'ip'; Name = 'dns' } -StripPrefixLength)[0]
+    Assert-Equal '10.1.1.5' $p.name
+    Assert-True $p.autoName 'not flagged'
+}
+
+Test-Case 'exporting sessions leaves out passwords and importing gives new ids' {
+    $store = New-TestStore
+    $rec = Add-PSTermFolder -Store $store -Path 'Lab'
+    $rec.defaults = New-PSTermProfile; $rec.defaults.ssh.user = 'ops'; $rec.defaults.credentialKey = 'folder:Lab'
+    $p = New-PSTermProfile -Name 'sw1'; $p.folder = 'Lab'; $p.ssh.host = '10.0.0.1'; $p.credentialKey = 'profile:xyz'
+    [void](Set-PSTermProfile -Store $store -Profile $p)
+    $file = Join-Path $sandbox 'export.psterm'
+    $count = Export-PSTermSessions -Store $store -Path $file
+    Assert-Equal 1 $count
+    $text = Get-Content -Raw -LiteralPath $file
+    Assert-True (-not ($text -match 'profile:xyz') -and -not ($text -match 'folder:Lab')) 'a secret key was exported'
+    $imported = Import-PSTermSessions -Path $file
+    Assert-Equal 1 @($imported.Profiles).Count
+    Assert-True ($imported.Profiles[0].id -ne $p.id) 'the id was reused'
+    Assert-Equal 'ops' (@($imported.Folders)[0].defaults.ssh.user)
+    $target = New-TestStore
+    Assert-Equal 1 (Merge-PSTermImportedSessions -Store $target -Profiles $imported.Profiles -Folders $imported.Folders)
+    Assert-Equal 0 (Merge-PSTermImportedSessions -Store $target -Profiles (Import-PSTermSessions -Path $file).Profiles) 'a duplicate was added'
+}
+
+Test-Case 'a file that is not a session file is refused' {
+    $file = Join-Path $sandbox 'junk.psterm'
+    Set-Content -LiteralPath $file -Value '{"hello": 1}'
+    $failed = $false
+    try { [void](Import-PSTermSessions -Path $file) } catch { $failed = $true }
+    Assert-True $failed 'accepted a file with no format marker'
 }
 
 }

@@ -309,7 +309,11 @@ namespace PSTerm.Io
 
                 if (_stream != null)
                 {
-                    try { _stream.Flush(); }
+                    try
+                    {
+                        if (_stopping) FlushRemainder(); else FlushIdleLine(false);
+                        _stream.Flush();
+                    }
                     catch (IOException) { }
                     catch (ObjectDisposedException) { return; }
                 }
@@ -368,51 +372,125 @@ namespace PSTerm.Io
 
             if (entry.FromUser)
             {
+                // The key that answers a pager ("space" or Enter at --More--) is not
+                // something the operator typed into the session; it is the reaction to
+                // the prompt, and is left out along with the prompt itself.
+                if (_assembler.PendingIsPager) return;
+
+                // What the host has shown so far comes first, or the typed text would
+                // land in the file ahead of the prompt it answers.
+                FlushIdleLine(true);
+
                 text = StripEscapes(text, ref _userStripState);
                 if (_options.MaskPasswords && _expectingPassword) text = MaskInput(text);
+                if (text.Length == 0) return;
+
+                WriteText(text);
+                RotateIfNeeded();
+                return;
             }
-            else
-            {
-                text = StripEscapes(text, ref _hostStripState);
-                TrackPasswordPrompt(text);
-            }
 
-            if (text.Length == 0) return;
+            // Password tracking looks at the text as it was sent; the line assembler
+            // below produces what the operator saw.
+            TrackPasswordPrompt(StripEscapes(text, ref _hostStripState));
 
-            if (_options.Format == LogFormat.Timestamped) WriteTimestamped(text);
-            else WritePlain(text);
+            _lineBuffer.Clear();
+            _assembler.Feed(text, _lineBuffer);
+            _lastHostTick = Environment.TickCount;
 
+            foreach (string line in _lineBuffer) WriteFinishedLine(line);
             RotateIfNeeded();
         }
 
-        private void WritePlain(string text)
+        // =====================================================================
+        // Text output
+        // =====================================================================
+
+        // Host output is assembled into lines before it is written, so that a device
+        // erasing its own text (the "--More--" pager prompt, a corrected command line)
+        // leaves the final text in the log rather than the debris.
+        private readonly LineAssembler _assembler = new LineAssembler();
+        private readonly List<string> _lineBuffer = new List<string>();
+        private int _lastHostTick = Environment.TickCount;
+        private bool _lineOpen;            // part of the current line is already in the file
+
+        private void WriteFinishedLine(string line)
         {
-            _stream.Write(text);
-            _written += text.Length;
+            if (_options.Format == LogFormat.Timestamped && !_lineOpen && line.Length > 0)
+                WriteStamp(_assembler.LineStart);
+
+            _stream.Write(line);
+            _stream.Write("\r\n");
+            _written += line.Length + 2;
+            _lineOpen = false;
         }
 
-        private void WriteTimestamped(string text)
+        /// <summary>
+        /// Write what has been received of the line being drawn, once the device has
+        /// gone quiet. A prompt ("Switch#") never ends in a newline, so without this
+        /// it would not reach the file until the next command. A pager prompt is
+        /// held back: the device is about to take it back.
+        /// </summary>
+        private void FlushIdleLine(bool force)
         {
-            string stamp = DateTime.Now.ToString(_options.TimestampFormat, CultureInfo.InvariantCulture);
+            if (_stream == null) return;
+            if (!force && unchecked(Environment.TickCount - _lastHostTick) < 400) return;
+            if (_assembler.PendingIsPager) return;
 
-            for (int i = 0; i < text.Length; i++)
+            string partial = _assembler.TakePartial();
+            if (partial == null) return;
+
+            if (_options.Format == LogFormat.Timestamped && !_lineOpen)
+                WriteStamp(_assembler.LineStart);
+
+            _stream.Write(partial);
+            _written += partial.Length;
+            _lineOpen = true;
+        }
+
+        private void FlushRemainder()
+        {
+            if (_stream == null) return;
+            string rest = _assembler.TakeRemainder();
+            if (rest == null) return;
+
+            if (_options.Format == LogFormat.Timestamped && !_lineOpen) WriteStamp(DateTime.Now);
+            _stream.Write(rest);
+            _written += rest.Length;
+        }
+
+        private void WriteStamp(DateTime when)
+        {
+            if (when == DateTime.MinValue) when = DateTime.Now;
+            string stamp = when.ToString(_options.TimestampFormat, CultureInfo.InvariantCulture);
+            _stream.Write('[');
+            _stream.Write(stamp);
+            _stream.Write("] ");
+            _written += stamp.Length + 3;
+        }
+
+        /// <summary>Typed input, written as it came.</summary>
+        private void WriteText(string text)
+        {
+            if (_options.Format == LogFormat.Timestamped)
             {
-                char c = text[i];
-
-                if (_atLineStart && c != '\r' && c != '\n')
+                for (int i = 0; i < text.Length; i++)
                 {
-                    _stream.Write('[');
-                    _stream.Write(stamp);
-                    _stream.Write("] ");
-                    _written += stamp.Length + 3;
-                    _atLineStart = false;
+                    char c = text[i];
+                    if (_atLineStart && c != '\r' && c != '\n')
+                    {
+                        WriteStamp(DateTime.Now);
+                        _atLineStart = false;
+                    }
+                    _stream.Write(c);
+                    _written++;
+                    if (c == '\n') _atLineStart = true;
                 }
-
-                _stream.Write(c);
-                _written++;
-
-                if (c == '\n') _atLineStart = true;
+                return;
             }
+
+            _stream.Write(text);
+            _written += text.Length;
         }
 
         private void RotateIfNeeded()

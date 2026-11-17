@@ -383,6 +383,69 @@ Test-Case 'backspace is applied so logs show the final command' {
     Assert-True ($content -match 'show ver') "backspaces not applied. Got: '$content'"
 }
 
+function Write-HostText($logger, [string]$text) {
+    $b = [System.Text.Encoding]::UTF8.GetBytes($text)
+    $logger.WriteFromHost($b, 0, $b.Length)
+}
+
+Test-Case 'a pager prompt that the device erases with backspaces is not logged' {
+    $path = Join-Path $logDir 'more-bs.log'
+    $opts = New-Object PSTerm.Io.SessionLoggerOptions
+    $opts.PathTemplate = $path
+    $logger = New-Object PSTerm.Io.SessionLogger($opts, (New-Tokens @{}))
+    $bs = "`b" * 10
+    Write-HostText $logger "line one`r`nline two`r`n --More-- "
+    Start-Sleep -Milliseconds 700    # long enough for an idle flush, which must not write the prompt
+    Write-HostText $logger "$bs          $bs  line three`r`nSwitch#"
+    $logger.Close()
+    $content = Get-Content -Raw -LiteralPath $path
+    Assert-True ($content -notmatch 'More') "the pager prompt reached the log: '$content'"
+    Assert-True ($content -match '(?m)^  line three\r?$') "text after the pager is wrong: '$content'"
+    Assert-True ($content -match 'Switch#') 'the prompt after the output is missing'
+}
+
+Test-Case 'a pager prompt erased with cursor movement (pseudo-console output) is not logged' {
+    $path = Join-Path $logDir 'more-csi.log'
+    $opts = New-Object PSTerm.Io.SessionLoggerOptions
+    $opts.PathTemplate = $path
+    $logger = New-Object PSTerm.Io.SessionLogger($opts, (New-Tokens @{}))
+    $esc = [char]27
+    Write-HostText $logger "Gi1/0/1 up`r`n --More-- "
+    Write-HostText $logger "${esc}[10D${esc}[K  Gi1/0/2 up`r`n"
+    Write-HostText $logger " --More-- ${esc}[10D${esc}[10X${esc}[10DGi1/0/3 up`r`n"
+    $logger.Close()
+    $content = Get-Content -Raw -LiteralPath $path
+    Assert-True ($content -notmatch 'More') "the pager prompt reached the log: '$content'"
+    Assert-True (($content -split "`r?`n" | Where-Object { $_ -match 'Gi1/0/' }).Count -eq 3) "interface lines lost: '$content'"
+}
+
+Test-Case 'the key that answers a pager prompt is not logged as typed input' {
+    $path = Join-Path $logDir 'more-key.log'
+    $opts = New-Object PSTerm.Io.SessionLoggerOptions
+    $opts.PathTemplate = $path
+    $opts.IncludeInput = $true
+    $logger = New-Object PSTerm.Io.SessionLogger($opts, (New-Tokens @{}))
+    Write-HostText $logger "first page`r`n --More-- "
+    $key = [System.Text.Encoding]::UTF8.GetBytes(' ')
+    $logger.WriteFromUser($key, 0, 1)
+    Write-HostText $logger ("`b" * 10 + ' ' * 10 + "`b" * 10 + "second page`r`n")
+    $logger.Close()
+    $content = Get-Content -Raw -LiteralPath $path
+    Assert-True ($content -match '(?m)^second page') "the answer to the pager was written into the line: '$content'"
+}
+
+Test-Case 'a prompt without a newline reaches the file once the device goes quiet' {
+    $path = Join-Path $logDir 'idle-prompt.log'
+    $opts = New-Object PSTerm.Io.SessionLoggerOptions
+    $opts.PathTemplate = $path
+    $logger = New-Object PSTerm.Io.SessionLogger($opts, (New-Tokens @{}))
+    Write-HostText $logger "Switch#"
+    Start-Sleep -Milliseconds 1200
+    $before = Get-Content -Raw -LiteralPath $path
+    $logger.Close()
+    Assert-True ($before -match 'Switch#') "prompt not flushed while the session was open: '$before'"
+}
+
 Test-Case 'an escape sequence split across two writes does not leak' {
     $path = Join-Path $logDir 'split.log'
     $opts = New-Object PSTerm.Io.SessionLoggerOptions
