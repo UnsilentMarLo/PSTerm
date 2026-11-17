@@ -31,6 +31,10 @@ function New-PSTermDefaultSettings {
         # Offer serial ports in the session list as soon as an adapter is plugged in.
         detectSerialPorts = $true
         detectedPortBaud = 9600
+        # Feed a pasted block to the device a line at a time, waiting for each answer:
+        # Off (the default), Serial, or All. It is slower; on the Catalyst switches it was
+        # tried on, a plain paste lost nothing. It is there for a console that does.
+        pacePaste        = 'Off'
         sidebarVisible   = $true
         sidebarWidth     = 310
     }

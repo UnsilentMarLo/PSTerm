@@ -119,7 +119,18 @@ namespace PSTerm.Backends
             port.WriteTimeout = 2000;
             port.ReadBufferSize = 16384;
 
-            port.Open();
+            // A port that was closed a moment ago can still be held by the driver ("access
+            // denied") while the last blocking read unwinds. Reconnecting right away is
+            // routine, so give it a couple of seconds before reporting the failure.
+            for (int attempt = 0; ; attempt++)
+            {
+                try { port.Open(); break; }
+                catch (UnauthorizedAccessException)
+                {
+                    if (attempt >= 20) throw;
+                    Thread.Sleep(100);
+                }
+            }
 
             _port = port;
             _portOpen = true;

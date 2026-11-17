@@ -25,6 +25,7 @@ $suites = @(
     @{ Name = 'Core';        Path = Join-Path $PSScriptRoot 'Run-Tests.ps1' }
     @{ Name = 'Profiles';    Path = Join-Path $PSScriptRoot 'Run-ProfileTests.ps1' }
     @{ Name = 'Integration'; Path = Join-Path $PSScriptRoot 'Run-IntegrationTests.ps1' }
+    @{ Name = 'Device';      Path = Join-Path $PSScriptRoot 'Run-DeviceTests.ps1' }
     # Builds and drives the real window, so it needs a desktop and an STA thread.
     @{ Name = 'Window';      Path = Join-Path $PSScriptRoot 'Run-UiTests.ps1'; Sta = $true }
 )

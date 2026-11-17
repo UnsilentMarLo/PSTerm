@@ -103,6 +103,26 @@ put on a share or a USB stick.
   PSTerm names the connection from a reverse DNS lookup, or failing that from the
   device's own prompt once it has connected.
 
+**Scripting devices**
+
+The same engine that answers prompts in a tab can be driven from a script, over a serial
+port, Telnet or SSH, with no window:
+
+```powershell
+$s = Connect-PSTermDevice -Profile $profile -Store $store -Root $root -Credential 'lab login' -EnableCredential 'lab enable' -Enter
+(Invoke-PSTermCommand $s 'show version | include uptime').Lines
+Send-PSTermConfig -Session $s -Line 'interface vlan 1', 'description uplink' -Safe -Verify { Test-Connection $addr -Quiet } -Save
+Save-PSTermConfigBackup -Session $s -Folder .\Backups -Name 'core-sw1'
+```
+
+A command ends when the device's prompt is showing and it has gone quiet; the pager is
+dealt with; a line the device refuses is reported in the device's own words. `-Safe` arms
+`reload in N` first and cancels it only if the change left the device reachable, so a
+change that cuts the way in undoes itself. `Backups` keeps dated copies and says which lines
+changed. Devices are described by a driver file (`src\Drivers\cisco-ios.json`).
+Pasting several lines can be fed in one line at a time, waiting for the prompt each time
+(Settings, *Paced paste*, off by default): it is slower, and a plain paste lost nothing on the
+Catalyst switches it was tried on, but a console that does drop characters needs it.
 **Logging**
 
 Plain-text logs are what was on the screen: a device that draws and then erases

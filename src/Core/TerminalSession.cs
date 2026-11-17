@@ -13,6 +13,7 @@
 
 using System;
 using System.ComponentModel;
+using System.Collections.Generic;
 using System.Text;
 using System.Threading;
 using System.Text.RegularExpressions;
@@ -173,6 +174,158 @@ namespace PSTerm
                 ExpectEngine expect = _expect;
                 if (expect != null) expect.Feed(chars, 0, charCount);
             }
+        }
+
+        // =====================================================================
+        // Paced sending
+        // =====================================================================
+
+        private int _pacing;
+        private volatile bool _cancelPacing;
+
+        /// <summary>True while a pasted block is being fed to the device line by line.</summary>
+        public bool IsPacing { get { return Volatile.Read(ref _pacing) != 0; } }
+
+        /// <summary>Raised on the UI thread with a progress or result message.</summary>
+        public event EventHandler<SessionMessageEventArgs> PacingMessage;
+
+        /// <summary>Stop a paced paste after the line in flight.</summary>
+        public void CancelPaced() { _cancelPacing = true; }
+
+        /// <summary>
+        /// Send several lines one at a time, waiting for the device to answer each one
+        /// before the next goes out. A serial console has no flow control to speak of:
+        /// pasted at full speed, a block of configuration can overrun it and arrive with
+        /// characters missing - silently, and in a configuration. Returns at once; the
+        /// work runs on a worker thread.
+        /// </summary>
+        public void SendPaced(string text)
+        {
+            if (string.IsNullOrEmpty(text)) return;
+
+            List<string> lines = new List<string>(text.Replace("\r\n", "\r").Replace("\n", "\r").Split(new char[] { (char)13 }));
+            bool endsWithBreak = text.EndsWith("\r") || text.EndsWith("\n");
+            if (endsWithBreak && lines.Count > 0) lines.RemoveAt(lines.Count - 1);
+
+            if (lines.Count <= 1)
+            {
+                Send(text);
+                return;
+            }
+
+            if (Interlocked.Exchange(ref _pacing, 1) != 0)
+            {
+                // A paste is already running: this one waits its turn behind it.
+                ThreadPool.QueueUserWorkItem(delegate
+                {
+                    while (IsPacing && !_hasClosed) Thread.Sleep(100);
+                    SendPaced(text);
+                });
+                return;
+            }
+
+            _cancelPacing = false;
+            ThreadPool.QueueUserWorkItem(delegate { RunPaced(lines, endsWithBreak); });
+        }
+
+        private void RunPaced(List<string> lines, bool lastLineEnds)
+        {
+            int sent = 0;
+            string outcome = "Pasted " + lines.Count.ToString() + " lines.";
+            try
+            {
+                for (int i = 0; i < lines.Count; i++)
+                {
+                    if (_cancelPacing) { outcome = "Paste stopped after " + sent.ToString() + " of " + lines.Count.ToString() + " lines."; break; }
+                    if (_hasClosed) { outcome = "The session ended after " + sent.ToString() + " of " + lines.Count.ToString() + " lines."; break; }
+
+                    bool last = (i == lines.Count - 1);
+                    int seq = Volatile.Read(ref _dataChunks);
+                    Send(lines[i] + ((!last || lastLineEnds) ? "\r" : ""));
+                    sent++;
+
+                    if (!last || lastLineEnds) WaitForDevice(seq);
+                    if (!last && (i % 5) == 4) RaisePacing("Pasting: " + sent.ToString() + " of " + lines.Count.ToString() + " lines...");
+                }
+            }
+            catch (Exception ex) { outcome = "The paste failed: " + ex.Message; }
+            finally { Interlocked.Exchange(ref _pacing, 0); }
+            RaisePacing(outcome);
+        }
+
+        /// <summary>
+        /// Wait for the device to answer the line just sent: some output, then quiet, then
+        /// a cursor line that looks like a prompt. A command that takes a while to finish
+        /// (generating a key) shows nothing at the cursor until it does, so it is waited
+        /// for, up to a limit, rather than answered by the next line piling in.
+        /// </summary>
+        private void WaitForDevice(int seq)
+        {
+            int start = Environment.TickCount;
+
+            // The echo of what was just sent.
+            while (Volatile.Read(ref _dataChunks) == seq && unchecked(Environment.TickCount - start) < 4000)
+            {
+                if (_cancelPacing || _hasClosed) return;
+                Thread.Sleep(10);
+            }
+
+            while (unchecked(Environment.TickCount - start) < 45000)
+            {
+                if (_cancelPacing || _hasClosed) return;
+                if (IdleMilliseconds >= 200 && CursorLineLooksLikePrompt()) return;
+                Thread.Sleep(20);
+            }
+        }
+
+        private static readonly Regex NoiseLine = new Regex(new DeviceDriver().NoisePattern);
+
+        /// <summary>
+        /// True when the device is waiting at a prompt. A device may print a log message
+        /// straight after its prompt without drawing the prompt again, so a cursor sitting
+        /// on such a line counts if the last real line above it looks like a prompt.
+        /// </summary>
+        public bool IsAtPrompt()
+        {
+            lock (_sink.SyncRoot)
+            {
+                ScreenBuffer screen = _term.Screen;
+                int abs = screen.HistoryCount + _term.CursorY;
+                for (int k = 0; k < 10 && abs - k >= 0; k++)
+                {
+                    int row = abs - k;
+                    if (row >= screen.TotalLines) continue;
+                    string line = screen.GetLineText(row).TrimEnd();
+                    if (line.Length == 0)
+                    {
+                        // An empty cursor line is a device still working; an empty line above
+                        // a log message is just spacing.
+                        if (k == 0) return false;
+                        continue;
+                    }
+                    if (NoiseLine.IsMatch(line.TrimStart())) continue;
+                    return EndsLikePrompt(line);
+                }
+                return false;
+            }
+        }
+
+        private static bool EndsLikePrompt(string line)
+        {
+            char c = line[line.Length - 1];
+            // > # ] : ? ) $
+            return c == (char)62 || c == (char)35 || c == (char)93 || c == (char)58 || c == (char)63 || c == (char)41 || c == (char)36;
+        }
+
+        private bool CursorLineLooksLikePrompt() { return IsAtPrompt(); }
+
+        private void RaisePacing(string message)
+        {
+            RaiseOnUi(new Action(delegate
+            {
+                EventHandler<SessionMessageEventArgs> h = PacingMessage;
+                if (h != null) h(this, new SessionMessageEventArgs(message));
+            }));
         }
 
         // =====================================================================

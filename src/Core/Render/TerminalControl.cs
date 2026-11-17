@@ -48,6 +48,10 @@ namespace PSTerm.Render
     public class TerminalInputEventArgs : EventArgs
     {
         public string Text;
+        /// <summary>The text came from a paste, not from keys.</summary>
+        public bool IsPaste;
+        /// <summary>The text is the terminal answering the device (a report), not the operator.</summary>
+        public bool IsReply;
         public TerminalInputEventArgs(string text) { Text = text; }
     }
 
@@ -470,7 +474,7 @@ namespace PSTerm.Render
 
         private void OnTerminalRespond(string s)
         {
-            RaiseInput(s);
+            RaiseInput(s, false, true);
         }
 
         private void OnTerminalBell()
@@ -498,6 +502,11 @@ namespace PSTerm.Render
 
         private void RaiseInput(string text)
         {
+            RaiseInput(text, false, false);
+        }
+
+        private void RaiseInput(string text, bool isPaste, bool isReply)
+        {
             if (string.IsNullOrEmpty(text)) return;
             EventHandler<TerminalInputEventArgs> h = Input;
             if (h == null) return;
@@ -512,12 +521,17 @@ namespace PSTerm.Render
                 BeginInvokeSafe(new MethodInvoker(delegate
                 {
                     EventHandler<TerminalInputEventArgs> inner = Input;
-                    if (inner != null) inner(this, new TerminalInputEventArgs(text));
+                    if (inner == null) return;
+                    TerminalInputEventArgs queued = new TerminalInputEventArgs(text);
+                    queued.IsPaste = isPaste; queued.IsReply = isReply;
+                    inner(this, queued);
                 }));
                 return;
             }
 
-            h(this, new TerminalInputEventArgs(text));
+            TerminalInputEventArgs args = new TerminalInputEventArgs(text);
+            args.IsPaste = isPaste; args.IsReply = isReply;
+            h(this, args);
         }
 
         // =====================================================================
@@ -1632,11 +1646,11 @@ namespace PSTerm.Render
             {
                 // Bracketed paste lets the remote application tell pasted text from
                 // typed text, which is what stops editors auto-indenting a paste.
-                RaiseInput("\x1b[200~" + text + "\x1b[201~");
+                RaiseInput("\x1b[200~" + text + "\x1b[201~", true, false);
             }
             else
             {
-                RaiseInput(text);
+                RaiseInput(text, true, false);
             }
         }
 

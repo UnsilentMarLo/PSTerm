@@ -632,7 +632,7 @@ function Show-PSTermSettings {
     $settings = Import-PSTermSettings -Root $State.Root
     $theme = $State.Theme
 
-    $shell = New-PSTermDialogShell -State $State -Title 'Settings' -Width 560 -Height 330 -OkText 'Save'
+    $shell = New-PSTermDialogShell -State $State -Title 'Settings' -Width 560 -Height 380 -OkText 'Save'
     $grid = New-PSTermFieldGrid
     $grid.Dock = 'Top'
 
@@ -642,6 +642,8 @@ function Show-PSTermSettings {
         -Tip 'Shows each COM port that appears under Detected serial ports so a console cable can be opened with a double-click. Nothing is saved.'
     $baud = Add-PSTermField $grid 'Detected port speed' (New-PSTermComboField -Items @('1200','2400','4800','9600','19200','38400','57600','115200') -Value ([string]$settings.detectedPortBaud) -Editable) $theme -Tips $shell.Tips `
         -Tip 'The baud rate used when a detected port is opened. Cisco consoles use 9600.'
+    $pace = Add-PSTermField $grid 'Paced paste' (New-PSTermComboField -Items @('Off', 'Serial', 'All') -Value ([string]$settings.pacePaste)) $theme -Tips $shell.Tips `
+        -Tip 'Feed a pasted block to the device one line at a time, waiting for each answer, instead of all at once. It is about two to three times slower. Turn it on for a console that drops characters when a block arrives at full speed; the Catalyst switches this was tried on did not. Serial = serial connections only.'
     $paste = Add-PSTermField $grid '' (New-PSTermCheckField 'Ask before pasting several lines' ([bool]$settings.confirmMultilinePaste)) $theme -Tips $shell.Tips `
         -Tip 'A pasted line break is an Enter keypress, so every line runs at once. This gives you the chance to say no.'
     $shell.Body.Controls.Add($grid)
@@ -652,6 +654,7 @@ function Show-PSTermSettings {
     $settings.detectSerialPorts = $detect.Checked
     $settings.detectedPortBaud = ConvertTo-PSTermInt $baud.Text 9600
     $settings.confirmMultilinePaste = $paste.Checked
+    $settings.pacePaste = [string]$pace.SelectedItem
     Save-PSTermSettings -Root $State.Root -Settings $settings
     Set-PSTermStatusMessage -State $State -Message 'Settings saved. The serial port setting applies the next time PSTerm starts.'
 }

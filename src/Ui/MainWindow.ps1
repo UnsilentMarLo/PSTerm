@@ -1397,7 +1397,17 @@ function New-PSTermSessionTab {
     # connection attempt, so they are wired once here.
     $terminal.Add_Input({
         param($sender, $e)
-        if ($tab.Session) { $tab.Session.Send($e.Text) }
+        $session = $tab.Session
+        if (-not $session) { return }
+
+        if ($e.IsPaste) {
+            if (Test-PSTermPacePaste -State $State -Tab $tab -Text $e.Text) { $session.SendPaced($e.Text); return }
+        }
+        elseif (-not $e.IsReply -and $session.IsPacing) {
+            # Typing while a paste is being fed in means the operator wants it stopped.
+            $session.CancelPaced()
+        }
+        $session.Send($e.Text)
     }.GetNewClosure())
 
     $terminal.Add_TerminalResized({
@@ -1433,6 +1443,24 @@ function New-PSTermSessionTab {
     Update-PSTermStatus -State $State
     $terminal.Focus() | Out-Null
     $tab
+}
+
+function Test-PSTermPacePaste {
+    <#
+    .SYNOPSIS
+        Whether a paste into this tab should be fed to the device line by line.
+    #>
+    param([Parameter(Mandatory)]$State, [Parameter(Mandatory)]$Tab, [string]$Text = '')
+
+    # A device that asked for bracketed paste takes the whole block as one unit.
+    if ($Text.StartsWith([string][char]27 + '[200~')) { return $false }
+
+    switch ([string](Import-PSTermSettings -Root $State.Root).pacePaste) {
+        'All'   { return $true }
+        'Off'   { return $false }
+        'Serial' { return ($Tab.Profile.type -eq 'Serial') }
+        default { return $false }
+    }
 }
 
 function Stop-PSTermConnectionAttempt {
@@ -1564,6 +1592,11 @@ function Complete-PSTermConnection {
         }
 
         Add-PSTermAutomation -State $State -Tab $Tab -Session $session
+
+        $session.Add_PacingMessage({
+            param($sender, $e)
+            Set-PSTermStatusMessage -State $State -Message $e.Message
+        }.GetNewClosure())
 
         $session.Add_RuleMatched({
             param($sender, $e)

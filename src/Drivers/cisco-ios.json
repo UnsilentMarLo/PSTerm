@@ -1,0 +1,22 @@
+{
+  "name": "cisco-ios",
+  "description": "Cisco IOS and IOS XE (Catalyst switches and routers)",
+  "promptPattern": "^[\\w.\\-/()+@:~ ]*[>#]\\s*$",
+  "userPromptPattern": ">\\s*$",
+  "privilegedPromptPattern": "#\\s*$",
+  "configPromptPattern": "\\(config[^)]*\\)#\\s*$",
+  "pagerPattern": "--More--\\s*$",
+  "pagerKey": " ",
+  "disablePagerCommand": "terminal length 0",
+  "errorPattern": "^%\\s",
+  "confirmPattern": "\\[confirm\\]\\s*$",
+  "yesNoPattern": "\\[yes/no\\]:?\\s*$",
+  "passwordPromptPattern": "(password|passphrase|passcode)[^:\\r\\n]*:\\s*$",
+  "userNamePromptPattern": "(user ?name|login)[^:\\r\\n]*:\\s*$",
+  "enableCommand": "enable",
+  "configureCommand": "configure terminal",
+  "endConfigCommand": "end",
+  "saveCommand": "write memory",
+  "reloadInCommand": "reload in {minutes}",
+  "reloadCancelCommand": "reload cancel"
+}
