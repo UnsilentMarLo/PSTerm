@@ -1,0 +1,10 @@
+{
+  "title": "Device health",
+  "description": "One row per device: processor and memory load, uptime, last restart, and how many ports are connected or in trouble (err-disabled). The quick look at a whole site.",
+  "version": "1.0",
+  "timeoutSec": 60,
+  "parameters": {
+    "CpuWarnPercent": { "label": "High processor load (%)" },
+    "MemWarnPercent": { "label": "High memory use (%)" }
+  }
+}

@@ -28,13 +28,15 @@ Add-Type -AssemblyName System.Drawing
 [System.Windows.Forms.Application]::EnableVisualStyles()
 . (Join-Path $root 'src\Bootstrap.ps1')
 Initialize-PSTermCore -Root $root
-foreach ($f in 'Settings', 'Secrets', 'Profiles', 'Store', 'Connect') { . (Join-Path $root "src\$f.ps1") }
-foreach ($f in 'Theme', 'Dialogs', 'Tools', 'MainWindow') { . (Join-Path $root "src\Ui\$f.ps1") }
+foreach ($f in 'Settings', 'Secrets', 'Profiles', 'Store', 'Connect', 'Device', 'DeviceParsers', 'Topology', 'Plugins') { . (Join-Path $root "src\$f.ps1") }
+foreach ($f in 'Theme', 'Dialogs', 'Tools', 'PluginDialog', 'MainWindow') { . (Join-Path $root "src\Ui\$f.ps1") }
 
 $core = [PSTerm.Vt.TerminalEmulator].Assembly.Location
 # Windows PowerShell resolves framework assemblies by name; PowerShell 7 needs the
 # whole reference set the core itself is built with.
 Add-Type -ReferencedAssemblies (@(Get-PSTermReferences) + $core) -Path (Join-Path $PSScriptRoot 'Fixtures\FakeLoginDevice.cs')
+Add-Type -ReferencedAssemblies (@(Get-PSTermReferences) + $core) -Path (Join-Path $PSScriptRoot 'Fixtures\FakeIosDevice.cs')
+. (Join-Path $PSScriptRoot 'Fixtures\New-FakeSwitchFactory.ps1')
 
 Add-Type -Namespace T -Name W -MemberDefinition '[System.Runtime.InteropServices.DllImport("user32.dll")] public static extern System.IntPtr SendMessage(System.IntPtr h, int m, System.IntPtr w, System.IntPtr l);'
 
@@ -486,7 +488,274 @@ try {
         $session.Dispose()
         Assert-True (-not (Test-Path -LiteralPath $known) -or (Get-Item -LiteralPath $known).Length -eq 0) 'answering no still recorded the key'
     }
-}
+
+    Write-Host "`nWindow furniture" -ForegroundColor Yellow
+
+    function Get-SideButton([string]$Text) {
+        foreach ($c in $state.TreeHost.Parent.Controls) {
+            if ($c -is [System.Windows.Forms.TableLayoutPanel]) { foreach ($b in $c.Controls) { if ($b.Text -in @($Text, 'Unpin') -and ($Text -ne 'Pin' -or $b.Text -in @('Pin', 'Unpin')) -and $b.Text -ne 'New' -or $b.Text -eq $Text) { if ($b.Text -eq $Text -or ($Text -eq 'Pin' -and $b.Text -eq 'Unpin')) { return $b } } } }
+        }
+    }
+
+    Test-Case 'the session list switch is inside the list, and the way back is at the left of the tabs' {
+        Assert-True ($state.SidebarButton.Parent -and $state.SidebarButton.Parent.Parent) 'the switch is not placed'
+        $inPanel = $false; $p = $state.SidebarButton.Parent
+        while ($p) { if ($p -eq $state.Split.Panel1) { $inPanel = $true }; $p = $p.Parent }
+        Assert-True $inPanel 'the hide switch is not inside the session panel'
+        Set-PSTermSidebar -State $state -Visible $false -NoSave; Pump 150
+        Assert-True $state.Split.Panel1Collapsed 'not collapsed'
+        Assert-True ($state.SidebarExpand.Visible -and $state.SidebarExpand.Width -gt 0) 'no way back'
+        Assert-True ($state.SidebarExpand.Bounds.Left -le 4) "the show switch is not at the left edge: $($state.SidebarExpand.Bounds.Left)"
+        Set-PSTermSidebar -State $state -Visible $true -NoSave; Pump 150
+        Assert-True (-not $state.Split.Panel1Collapsed -and -not $state.SidebarExpand.Visible) 'not restored'
+    }
+    Test-Case 'Edit, Pin and Delete are all dimmed when nothing is selected, all lit for a connection' {
+        Reset-Store
+        $p = Add-TestProfile -Name 'only one'
+        Update-PSTermTree -State $state
+        $state.Tree.SelectedNode = $null
+        Update-PSTermTreeButtons -State $state
+        foreach ($name in 'Edit', 'Pin', 'Delete') { Assert-True (-not (Get-SideButton $name).Enabled) "$name is lit with nothing selected" }
+        $node = $state.Tree.Nodes | ForEach-Object { $_ } | Where-Object { [string]$_.Tag -eq "p:$($p.id)" } | Select-Object -First 1
+        if (-not $node) { $node = Find-PSTermTreeNode -Nodes $state.Tree.Nodes -Tag "p:$($p.id)" }
+        $state.Tree.SelectedNode = $node
+        Update-PSTermTreeButtons -State $state
+        foreach ($name in 'Edit', 'Pin', 'Delete') { Assert-True ((Get-SideButton $name).Enabled) "$name is dimmed for a connection" }
+    }
+    Test-Case 'the find window is a window of its own: it does not lock the main window, and closes cleanly' {
+        $prof = New-PSTermProfile -Name 'findme' -Type 'Shell'; $prof.shell.commandLine = 'cmd.exe'
+        [void](Set-PSTermProfile -Store $state.Store -Profile $prof)
+        $tab = New-PSTermSessionTab -State $state -Profile $prof
+        try {
+            Pump 800
+            Show-PSTermFind -State $state
+            Assert-True ($null -ne $state.FindDialog -and $state.FindDialog.Visible) 'the find window is not showing'
+            Assert-True $state.Form.Enabled 'the main window was locked'
+            Assert-True ($state.FindDialog.FormBorderStyle -eq 'FixedDialog') 'not the standard dialog frame'
+            Assert-True ($state.FindDialog.Owner -eq $state.Form) 'not owned by the main window'
+            # a second request brings the same window back instead of opening another
+            $first = $state.FindDialog; Show-PSTermFind -State $state
+            Assert-True ([object]::ReferenceEquals($first, $state.FindDialog)) 'a second window opened'
+            # the main window still works while it is open
+            Set-PSTermStatusMessage -State $state -Message 'still alive'
+            Assert-Equal 'still alive' $state.StatusLeft.Text
+            $state.FindDialog.Close(); Pump 200
+            Assert-True ($null -eq $state.FindDialog) 'the window was not forgotten after closing'
+        }
+        finally { if ($state.FindDialog) { $state.FindDialog.Close() }; Close-PSTermTab -State $state -Index ($state.Tabs.Count - 1) -Force }
+    }
+    Test-Case 'the toolbar has a Plugins button that opens the plugin window' {
+        $item = $state.Ribbon.Find('plugins')
+        Assert-True ($null -ne $item) 'there is no Plugins button'
+        Assert-True ($item.Group -eq 'Automation') "it is in the group '$($item.Group)'"
+    }
+    Test-Case 'the settings dialog opens and offers the paste block sizes (and no sentence about testing)' {
+        $seen = @{ Text = ''; Items = @(); Ticks = 0 }
+        $t = New-Object System.Windows.Forms.Timer; $t.Interval = 250
+        # A modal dialog blocks this script, so a timer has to be the one to close it - and it has to
+        # close it whatever happens, or the whole run waits for ever.
+        $t.Add_Tick({
+            $seen.Ticks++
+            $f = [System.Windows.Forms.Application]::OpenForms | Where-Object { $_.Text -eq 'Settings' } | Select-Object -First 1
+            try {
+                if ($f) {
+                    $seen.Text = $f.Text
+                    $stack = New-Object System.Collections.Stack; $stack.Push($f)
+                    while ($stack.Count) { $c = $stack.Pop(); if ($c -is [PSTerm.Render.ThemedComboBox]) { $seen.Items += ,@($c.Items | ForEach-Object { [string]$_ }) }; foreach ($k in $c.Controls) { $stack.Push($k) } }
+                }
+            }
+            finally {
+                if ($f -or $seen.Ticks -gt 40) {
+                    $t.Stop()
+                    foreach ($other in @([System.Windows.Forms.Application]::OpenForms | Where-Object { $_ -ne $form })) { try { $other.Close() } catch { } }
+                }
+            }
+        }.GetNewClosure())
+        $t.Start(); Show-PSTermSettings -State $state; $t.Dispose()
+        Assert-Equal 'Settings' $seen.Text 'the dialog did not open'
+        $flat = @($seen.Items | ForEach-Object { $_ -join '|' })
+        Assert-True ($flat -contains 'Line by line|5 lines at a time|10 lines at a time|20 lines at a time|50 lines at a time') "combos: $($flat -join ' // ')"
+        $src = [System.IO.File]::ReadAllText((Join-Path $root 'src\Ui\Tools.ps1'))
+        Assert-True ($src -notmatch 'Catalyst switches this was tried on') 'the tooltip still talks about testing'
+    }
+    Test-Case 'credentials can be managed with no connection open, and there is no Copy button' {
+        while ($state.Tabs.Count -gt 0) { Close-PSTermTab -State $state -Index 0 -Force }
+        Update-PSTermStatus -State $state
+        Assert-True ($state.Ribbon.Find('creds').Enabled) 'the Credentials button is dimmed without a connection'
+        Assert-True ($null -eq $state.Ribbon.Find('copy')) 'the Copy button is still on the toolbar'
+        # the menu itself: send entries are dimmed, Manage credentials is not
+        Reset-Store
+        [void](Set-PSTermCredential -Store $state.Store -Root $sandbox -Name 'Lab enable' -Secret 'x')
+        $menuShown = $null
+        $null = $state.Ribbon
+        $m = New-PSTermMenu -Theme $state.Theme
+        $item = $m.Items.Add('Manage credentials...')
+        Assert-True $item.Enabled 'the manage entry is dimmed'
+        $m.Dispose()
+    }
+    Test-Case 'hovering a menu item with a tooltip raises no error' {
+        $m = New-PSTermMenu -Theme $state.Theme
+        $item = $m.Items.Add('Entry'); $item.ToolTipText = 'A tip'
+        $flags = [System.Reflection.BindingFlags]'NonPublic,Instance'
+        foreach ($name in 'OnMouseEnter', 'OnMouseLeave') {
+            [void]$item.GetType().GetMethod($name, $flags).Invoke($item, @([EventArgs]::Empty))
+        }
+        $m.Dispose()
+    }
+    Test-Case 'a menu item''s tooltip is the application''s own, not the system one' {
+        $m = New-PSTermMenu -Theme $state.Theme
+        Assert-True (-not $m.ShowItemToolTips) 'the system tooltip is still on for menus'
+        $m.Dispose()
+    }
+
+    Write-Host "`nPlugin window" -ForegroundColor Yellow
+
+    $fixtureDir = Join-Path $PSScriptRoot 'Fixtures\ios'
+    function New-PluginDialog {
+        param([string]$FailFor = '')
+        Reset-Store
+        $state.DetectedPorts = @()
+        [void](Add-TestProfile -Name 'lab-core' -Folder 'Lab' -HostName '192.168.77.1')
+        [void](Add-TestProfile -Name 'lab-edge' -Folder 'Lab' -HostName '192.168.77.2')
+        $dlg = New-PSTermPluginDialog -State $state -SessionFactory (New-FakeSwitchFactoryText -FixtureDir $fixtureDir -FailFor $FailFor)
+        $dlg.Form.Owner = $form
+        $dlg.Form.Show()
+        Pump 300
+        $dlg
+    }
+    function Close-PluginDialog { param($Dlg) $Dlg.Timer.Stop(); $Dlg.Form.Close(); $Dlg.Form.Dispose(); $Dlg.Shell.Tips.Dispose() }
+    function Select-Plugin { param($Dlg, [string]$Title)
+        $i = -1; for ($k = 0; $k -lt $Dlg.PluginList.Items.Count; $k++) { if ([string]$Dlg.PluginList.Items[$k] -like "$Title*") { $i = $k } }
+        Assert-True ($i -ge 0) "no plugin '$Title' in the list"
+        $Dlg.PluginList.SelectedIndex = $i; Pump 150
+    }
+    function Wait-PluginRun { param($Dlg)
+        Assert-True (Wait-Until { $Dlg.State.Run -and $Dlg.State.Run.Done -and $Dlg.RunButton.Enabled } 30000) "the run did not finish (status: '$($Dlg.Status.Text)'; run: $(if ($Dlg.State.Run) { 'started, done=' + $Dlg.State.Run.Done } else { 'never started' }))"
+        Pump 200
+    }
+
+    Test-Case 'the window lists the built-in plugins and builds the form from the script' {
+        $dlg = New-PluginDialog
+        try {
+            Assert-True ($dlg.PluginList.Items.Count -ge 5) "only $($dlg.PluginList.Items.Count) plugins"
+            Select-Plugin $dlg 'Interface health'
+            Assert-True ($dlg.State.Fields.ContainsKey('MinErrors') -and $dlg.State.Fields.ContainsKey('OnlyProblems')) "fields: $($dlg.State.Fields.Keys -join ', ')"
+            Assert-Equal 2 $dlg.TargetList.Items.Count
+            Assert-Equal 'Lab / lab-core' ([string]$dlg.TargetList.Items[0])
+        }
+        finally { Close-PluginDialog $dlg }
+    }
+    Test-Case 'the window follows the theme: muted text stays muted, lists and grid use the theme colours, it fits the screen' {
+        $dlg = New-PluginDialog
+        try {
+            $theme = $state.Theme
+            Set-PSTermFormTheme -Control $dlg.Form -Theme $theme    # what showing the dialog does
+            Assert-True ($dlg.Status.ForeColor.ToArgb() -eq $theme.TextMuted.ToArgb()) 'the status line lost its muted colour'
+            Assert-Equal 'OwnerDrawFixed' ([string]$dlg.PluginList.DrawMode) 'the plugin list is drawn by the system (blue highlight)'
+            Assert-Equal 'OwnerDrawFixed' ([string]$dlg.TargetList.DrawMode) 'the device list is drawn by the system (blue highlight)'
+            Assert-True ($dlg.Grid.BackgroundColor.ToArgb() -eq $theme.Surface.ToArgb()) 'grid background'
+            $buffered = [System.Windows.Forms.DataGridView].GetProperty('DoubleBuffered', [System.Reflection.BindingFlags]'NonPublic,Instance').GetValue($dlg.Grid, $null)
+            Assert-True $buffered 'the results table is not double-buffered (scrolling flickers)'
+            Assert-True ($dlg.Grid.ColumnHeadersDefaultCellStyle.BackColor.ToArgb() -eq $theme.Field.ToArgb()) 'grid header colour'
+            $area = [System.Windows.Forms.Screen]::FromControl($form).WorkingArea
+            Assert-True ($dlg.Form.Width -le $area.Width -and $dlg.Form.Height -le $area.Height) "window $($dlg.Form.Width)x$($dlg.Form.Height) is larger than the screen $($area.Width)x$($area.Height)"
+        }
+        finally { Close-PluginDialog $dlg }
+    }
+    Test-Case 'detected serial ports are in the device list, and a port that a tab holds is refused clearly' {
+        $dlg = New-PluginDialog
+        try {
+            $state.DetectedPorts = @([pscustomobject]@{ PortName = 'COM77'; Description = 'Test adapter' })
+            $dlg.Form.Activate(); [void]$dlg.Form.Focus(); Pump 150
+            # the list refreshes when the window is activated; do it directly as well
+            $entries = @(Get-PSTermPluginTargetEntries -State $state)
+            Assert-Equal 3 $entries.Count 'two saved connections and one detected port'
+            $port = $entries | Where-Object { $_.Id -eq 'port:COM77' }
+            Assert-True ($port.Label -match 'Detected serial ports / COM77' -and $port.Label -match 'Test adapter') $port.Label
+            Assert-Equal 'Serial' $port.Profile.type; Assert-Equal 'COM77' $port.Profile.serial.portName
+
+            # a tab holds that port
+            $held = New-PSTermProfile -Name 'console' -Type 'Serial'; $held.serial.portName = 'COM77'
+            $state.Tabs.Add([pscustomobject]@{ Closed = $false; Profile = $held })
+            try {
+                $busy = @(Get-PSTermPluginTargetEntries -State $state | Where-Object { $_.Busy })
+                Assert-Equal 1 $busy.Count; Assert-True ($busy[0].Busy -match "COM77 is open in the tab 'console'") $busy[0].Busy
+                Select-Plugin $dlg 'Inventory'
+                [void]$dlg.State.Selected.Add('port:COM77')
+                $dlg.RunButton.PerformClick(); Pump 200
+                Assert-True ($null -eq $dlg.State.Run) 'a run started on a port a tab holds'
+                Assert-True ($dlg.Status.Text -match 'open in the tab') $dlg.Status.Text
+            }
+            finally { $state.Tabs.RemoveAt($state.Tabs.Count - 1) }
+        }
+        finally { $state.DetectedPorts = @(); Close-PluginDialog $dlg }
+    }
+    Test-Case 'running without a device picked says so and starts nothing' {
+        $dlg = New-PluginDialog
+        try {
+            Select-Plugin $dlg 'Device health'
+            $dlg.RunButton.PerformClick(); Pump 200
+            Assert-True ($dlg.Status.Text -match 'Pick at least one') $dlg.Status.Text
+            Assert-True ($null -eq $dlg.State.Run) 'a run started'
+        }
+        finally { Close-PluginDialog $dlg }
+    }
+    Test-Case 'a run fills the table, keeps the window alive and can be sorted' {
+        $dlg = New-PluginDialog
+        try {
+            Select-Plugin $dlg 'Device health'
+            $dlg.PickAll.PerformClick(); Pump 100
+            $dlg.RunButton.PerformClick(); Pump 100
+            Assert-True (-not $dlg.RunButton.Enabled -and $dlg.StopButton.Enabled) 'buttons did not change while running'
+            Wait-PluginRun $dlg
+            Assert-True ($dlg.Status.Text -match '2 of 2 devices answered') "status: $($dlg.Status.Text); hosts: $($dlg.State.Run.Hosts | Out-String)"
+            Assert-Equal 2 $dlg.Grid.Rows.Count "(view $($dlg.ViewBox.SelectedItem), table rows $($dlg.State.Table.Rows.Count), source $($dlg.Grid.DataSource))"
+            $cols = @($dlg.Grid.Columns | ForEach-Object { $_.Name })
+            Assert-True ($cols[0] -eq 'Target' -and $cols -contains 'Cpu5m' -and $cols -contains 'Status') "columns: $($cols -join ',')"
+            Assert-True ($dlg.Grid.Columns['Cpu5m'].ValueType -eq [long]) 'a numeric column is not numeric'
+            $dlg.Grid.Sort($dlg.Grid.Columns['Target'], [System.ComponentModel.ListSortDirection]::Descending); Pump 100
+            Assert-Equal 'lab-edge' ([string]$dlg.Grid.Rows[0].Cells['Target'].Value)
+        }
+        finally { Close-PluginDialog $dlg }
+    }
+    Test-Case 'the neighbour plugin shows a diagram' {
+        $dlg = New-PluginDialog
+        try {
+            Select-Plugin $dlg 'Neighbours'
+            $dlg.PickAll.PerformClick(); Pump 100
+            $dlg.RunButton.PerformClick()
+            Wait-PluginRun $dlg
+            Assert-Equal 'Topology' ([string]$dlg.ViewBox.SelectedItem)
+            Assert-True ($dlg.Picture.Visible -and $null -ne $dlg.Picture.Image -and $dlg.Picture.Image.Width -gt 200) 'no diagram'
+            Assert-True (-not $dlg.Grid.Visible) 'the table is still showing'
+        }
+        finally { Close-PluginDialog $dlg }
+    }
+    Test-Case 'when every device fails the window shows why' {
+        $dlg = New-PluginDialog -FailFor 'lab-core'
+        try {
+            Select-Plugin $dlg 'Inventory'
+            $dlg.TargetList.SetSelected(0, $true); Pump 100
+            $dlg.RunButton.PerformClick()
+            Wait-PluginRun $dlg
+            Assert-Equal 'Devices' ([string]$dlg.ViewBox.SelectedItem) "status: $($dlg.Status.Text)"
+            Assert-True ($dlg.Status.Text -match '1 failed') $dlg.Status.Text
+            Assert-True ([string]$dlg.Grid.Rows[0].Cells['Error'].Value -match 'simulated connection failure') 'the error is not shown'
+        }
+        finally { Close-PluginDialog $dlg }
+    }
+    Test-Case 'Stop lets the devices go and the window is usable again' {
+        $dlg = New-PluginDialog
+        try {
+            Select-Plugin $dlg 'Inventory'
+            $dlg.PickAll.PerformClick(); Pump 100
+            $dlg.RunButton.PerformClick(); Pump 50
+            $dlg.StopButton.PerformClick(); Pump 300
+            Assert-True ($dlg.RunButton.Enabled -and -not $dlg.StopButton.Enabled) 'the buttons did not come back'
+            Assert-True ($dlg.State.Run.Done) 'the run is not finished'
+        }
+        finally { Close-PluginDialog $dlg }
+    }}
 finally {
     if ($form) { try { $form.Tag.MainTimer.Stop() } catch { }; try { $form.Tag.Ports.Dispose() } catch { } ; $form.Dispose() }
     Remove-Item -LiteralPath $sandbox -Recurse -Force -ErrorAction SilentlyContinue

@@ -23,6 +23,9 @@ public class FakeIosDevice : ITerminalBackend
     public readonly List<string> Received = new List<string>();
     public readonly List<long> ReceivedTicks = new List<long>();
     public readonly List<string> ConfigLines = new List<string>();
+    /// <summary>Output for exact commands ("show version"), as the lines a real device would print.</summary>
+    public readonly Dictionary<string, string> Canned = new Dictionary<string, string>();
+    public int CannedDelayMs = 0;
 
     private string _mode = "user";       // user, priv, config, config-if
     private string _stage = "";           // "", login, enable-pw, reload-save, reload-confirm, paging
@@ -138,7 +141,7 @@ public class FakeIosDevice : ITerminalBackend
         string cmd = w[0];
 
         // A command that takes a while: the echo is immediate, the prompt comes later.
-        if (cmd == "slow")
+        if (cmd == "slow" || (cmd == "show" && w.Length == 2 && w[1] == "slow"))
         {
             ThreadPool.QueueUserWorkItem(delegate { Thread.Sleep(1500); Emit(Prompt); });
             return;
@@ -156,6 +159,20 @@ public class FakeIosDevice : ITerminalBackend
             if (cmd == "interface") { _mode = "config-if"; o.Append(Prompt); return; }
             if (cmd == "description" || cmd == "ip" || cmd == "no" || cmd == "shutdown") { Dirty = true; ConfigLines.Add(text); o.Append(Prompt); return; }
             o.Append("% Invalid input detected at '^' marker.\r\n\r\n" + Prompt);
+            return;
+        }
+
+        if (_mode == "priv" && Canned.ContainsKey(text))
+        {
+            _pageLines = new List<string>(Canned[text].Replace("\r\n", "\n").TrimEnd(new char[] { (char)10 }).Split(new char[] { (char)10 }));
+            if (CannedDelayMs > 0)
+            {
+                string[] snapshot = _pageLines.ToArray();
+                _pageLines = null;
+                ThreadPool.QueueUserWorkItem(delegate { Thread.Sleep(CannedDelayMs); Emit(string.Join("\r\n", snapshot) + "\r\n" + Prompt); });
+                return;
+            }
+            NextPage(o, true);
             return;
         }
 

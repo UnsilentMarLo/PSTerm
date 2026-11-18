@@ -199,9 +199,16 @@ namespace PSTerm
         /// characters missing - silently, and in a configuration. Returns at once; the
         /// work runs on a worker thread.
         /// </summary>
-        public void SendPaced(string text)
+        public void SendPaced(string text) { SendPaced(text, 1); }
+
+        /// <summary>
+        /// As above, but <paramref name="blockLines"/> lines go out together before the device is
+        /// waited for: 1 is line by line, 5 or 10 trade a little safety for speed.
+        /// </summary>
+        public void SendPaced(string text, int blockLines)
         {
             if (string.IsNullOrEmpty(text)) return;
+            if (blockLines < 1) blockLines = 1;
 
             List<string> lines = new List<string>(text.Replace("\r\n", "\r").Replace("\n", "\r").Split(new char[] { (char)13 }));
             bool endsWithBreak = text.EndsWith("\r") || text.EndsWith("\n");
@@ -219,40 +226,48 @@ namespace PSTerm
                 ThreadPool.QueueUserWorkItem(delegate
                 {
                     while (IsPacing && !_hasClosed) Thread.Sleep(100);
-                    SendPaced(text);
+                    SendPaced(text, blockLines);
                 });
                 return;
             }
 
             _cancelPacing = false;
-            ThreadPool.QueueUserWorkItem(delegate { RunPaced(lines, endsWithBreak); });
+            ThreadPool.QueueUserWorkItem(delegate { RunPaced(lines, endsWithBreak, blockLines); });
         }
 
-        private void RunPaced(List<string> lines, bool lastLineEnds)
+        private void RunPaced(List<string> lines, bool lastLineEnds, int block)
         {
             int sent = 0;
             string outcome = "Pasted " + lines.Count.ToString() + " lines.";
             try
             {
-                for (int i = 0; i < lines.Count; i++)
+                for (int i = 0; i < lines.Count; i += block)
                 {
                     if (_cancelPacing) { outcome = "Paste stopped after " + sent.ToString() + " of " + lines.Count.ToString() + " lines."; break; }
                     if (_hasClosed) { outcome = "The session ended after " + sent.ToString() + " of " + lines.Count.ToString() + " lines."; break; }
 
-                    bool last = (i == lines.Count - 1);
+                    int end = Math.Min(i + block, lines.Count);
+                    bool last = (end == lines.Count);
+                    StringBuilder chunk = new StringBuilder();
+                    for (int k = i; k < end; k++)
+                    {
+                        chunk.Append(lines[k]);
+                        bool lastOfAll = (k == lines.Count - 1);
+                        if (!lastOfAll || lastLineEnds) chunk.Append("\r");
+                    }
+
                     int seq = Volatile.Read(ref _dataChunks);
-                    Send(lines[i] + ((!last || lastLineEnds) ? "\r" : ""));
-                    sent++;
+                    Send(chunk.ToString());
+                    sent = end;
 
                     if (!last || lastLineEnds) WaitForDevice(seq);
-                    if (!last && (i % 5) == 4) RaisePacing("Pasting: " + sent.ToString() + " of " + lines.Count.ToString() + " lines...");
+                    if (!last) RaisePacing("Pasting: " + sent.ToString() + " of " + lines.Count.ToString() + " lines...");
                 }
             }
             catch (Exception ex) { outcome = "The paste failed: " + ex.Message; }
             finally { Interlocked.Exchange(ref _pacing, 0); }
             RaisePacing(outcome);
         }
-
         /// <summary>
         /// Wait for the device to answer the line just sent: some output, then quiet, then
         /// a cursor line that looks like a prompt. A command that takes a while to finish

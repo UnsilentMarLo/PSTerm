@@ -1,0 +1,10 @@
+{
+  "title": "Transceiver levels",
+  "description": "Light levels, temperature and voltage of every optical module that reports them, with the device's own alarm marks and a low-light check.",
+  "version": "1.0",
+  "timeoutSec": 90,
+  "parameters": {
+    "LowRxDbm": { "label": "Low receive level (dBm)" },
+    "HighTempC": { "label": "High temperature (C)" }
+  }
+}

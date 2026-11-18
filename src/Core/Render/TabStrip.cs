@@ -94,7 +94,8 @@ namespace PSTerm.Render
 
         private const int NewTabButtonWidth = 34;
 
-        private ToolTip _toolTip;
+        private ThemedToolTip _tips = new ThemedToolTip();
+        private string _shownTip = "";
 
         public event EventHandler<TabStripEventArgs> SelectedChanged;
         public event EventHandler<TabStripEventArgs> CloseRequested;
@@ -111,14 +112,7 @@ namespace PSTerm.Render
             Height = 30;
             Dock = DockStyle.Top;
 
-            // Owner-drawn: a system tool tip is light and would be the last
-            // white thing left on a dark window.
-            _toolTip = new ToolTip();
-            _toolTip.InitialDelay = 600;
-            _toolTip.ReshowDelay = 200;
-            _toolTip.OwnerDraw = true;
-            _toolTip.Draw += OnToolTipDraw;
-            _toolTip.Popup += OnToolTipPopup;
+            // The shared tooltip: same colours, font and placement as every other tip.
         }
 
         public IList<TabStripItem> Items { get { return _items; } }
@@ -249,7 +243,8 @@ namespace PSTerm.Render
         {
             int width = TabWidth;
             int x = -_scrollOffset;
-            int closeSize = 16;
+            // Sized with the interface, not in raw pixels: 16 px is a speck on a scaled display.
+            int closeSize = (int)Math.Round(20 * NativeTheme.GetScale(Font));
 
             for (int i = 0; i < _items.Count; i++)
             {
@@ -413,10 +408,11 @@ namespace PSTerm.Render
                 }
 
                 Color crossColor = closeHot ? TextColor : MutedTextColor;
-                using (Pen pen = new Pen(crossColor, 1.3f))
+                float scale = NativeTheme.GetScale(Font);
+                using (Pen pen = new Pen(crossColor, 1.6f * scale))
                 {
                     Rectangle c = item.CloseBounds;
-                    int pad = 5;
+                    int pad = (int)Math.Round(c.Width * 0.3);
                     g.DrawLine(pen, c.Left + pad, c.Top + pad, c.Right - pad, c.Bottom - pad);
                     g.DrawLine(pen, c.Right - pad, c.Top + pad, c.Left + pad, c.Bottom - pad);
                 }
@@ -498,7 +494,12 @@ namespace PSTerm.Render
                 string tip = "";
                 if (onNewTab) tip = "New connection (Ctrl+Shift+T)";
                 else if (index >= 0) tip = string.IsNullOrEmpty(_items[index].Tooltip) ? _items[index].Title : _items[index].Tooltip;
-                if (_toolTip.GetToolTip(this) != tip) _toolTip.SetToolTip(this, tip);
+                if (tip != _shownTip)
+                {
+                    _shownTip = tip;
+                    _tips.Hide(this);
+                    if (!string.IsNullOrEmpty(tip)) _tips.ShowAt(this, tip, Point.Empty);
+                }
             }
         }
 
@@ -508,6 +509,8 @@ namespace PSTerm.Render
             _hoverIndex = -1;
             _hoverCloseIndex = -1;
             _hoverNewTab = false;
+            _shownTip = "";
+            _tips.Hide(this);
             Invalidate();
         }
 
@@ -559,36 +562,12 @@ namespace PSTerm.Render
                 _selectedIndex + (e.Delta > 0 ? -1 : 1)));
         }
 
-        private void OnToolTipPopup(object sender, PopupEventArgs e)
-        {
-            string text = _toolTip.GetToolTip(e.AssociatedControl);
-            if (string.IsNullOrEmpty(text)) return;
-            Size size = TextRenderer.MeasureText(text, Font,
-                new Size(480, int.MaxValue), TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak);
-            e.ToolTipSize = new Size(size.Width + 18, size.Height + 12);
-        }
-
-        private void OnToolTipDraw(object sender, DrawToolTipEventArgs e)
-        {
-            using (SolidBrush brush = new SolidBrush(ActiveTabBackground))
-                e.Graphics.FillRectangle(brush, e.Bounds);
-            using (Pen pen = new Pen(BorderColor))
-                e.Graphics.DrawRectangle(pen, 0, 0, e.Bounds.Width - 1, e.Bounds.Height - 1);
-
-            Rectangle text = Rectangle.Inflate(e.Bounds, -8, -5);
-            TextRenderer.DrawText(e.Graphics, e.ToolTipText, Font, text, TextColor,
-                TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
-                TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak);
-        }
-
         protected override void Dispose(bool disposing)
         {
-            if (disposing && _toolTip != null)
+            if (disposing && _tips != null)
             {
-                _toolTip.Draw -= OnToolTipDraw;
-                _toolTip.Popup -= OnToolTipPopup;
-                _toolTip.Dispose();
-                _toolTip = null;
+                _tips.Dispose();
+                _tips = null;
             }
             base.Dispose(disposing);
         }

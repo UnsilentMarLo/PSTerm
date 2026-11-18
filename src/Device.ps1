@@ -66,6 +66,27 @@ function Connect-PSTermDevice {
         [int]$TimeoutSec = 30
     )
 
+    $login = Resolve-PSTermDeviceLogin -Profile $Profile -Store $Store -Root $Root -Credential $Credential -EnableCredential $EnableCredential
+    $driver = Get-PSTermDriver -Name $DriverName -Root $Root
+    Open-PSTermDeviceSession -Profile $Profile -Login $login -Driver $driver -Enter:$Enter -AcceptHostKey:$AcceptHostKey -TimeoutSec $TimeoutSec
+}
+
+function Resolve-PSTermDeviceLogin {
+    <#
+    .SYNOPSIS
+        Work out the user name, password and enable password for a device from the
+        profile, its folder and the named quick credentials. Nothing is typed anywhere
+        yet; the result goes to Open-PSTermDeviceSession.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Profile,
+        [Parameter(Mandatory)]$Store,
+        [Parameter(Mandatory)][string]$Root,
+        [string]$Credential = '',
+        [string]$EnableCredential = ''
+    )
+
     $login = Resolve-PSTermLogin -Store $Store -Root $Root -Profile $Profile
     $user = [string]$login.User
     $password = $login.Password
@@ -83,7 +104,34 @@ function Connect-PSTermDevice {
         if (-not $e) { throw "There is no quick credential called '$EnableCredential'." }
         $enablePassword = Get-PSTermSecret -Root $Root -Key ([string]$e.secretKey)
     }
+    [pscustomobject]@{ User = $user; Password = $password; EnablePassword = $enablePassword }
+}
 
+function Open-PSTermDeviceSession {
+    <#
+    .SYNOPSIS
+        Open a device session with an already-resolved login. Also what the plugin host
+        runs in its worker threads, which is why it takes the driver and the login as
+        objects instead of looking them up.
+    .PARAMETER ReadOnly
+        Make the session refuse every command that is not a look-only command. Done before
+        anything else can be sent, and it cannot be undone.
+    #>
+    [CmdletBinding()]
+    param(
+        [Parameter(Mandatory)]$Profile,
+        [Parameter(Mandatory)]$Login,
+        [Parameter(Mandatory)]$Driver,
+        [switch]$Enter,
+        [switch]$AcceptHostKey,
+        [switch]$ReadOnly,
+        [int]$TimeoutSec = 30,
+        # A table the session is put in as soon as it exists, so whoever started this can close
+        # it while it is still logging in (the plugin host does, on a timeout or Stop).
+        [hashtable]$Publish
+    )
+
+    $user = [string]$Login.User
     if ($Profile.type -eq 'SSH') {
         if (-not $user) { throw "No user name is known for '$($Profile.name)'." }
         if ($AcceptHostKey) { $Profile = Copy-PSTermObject -Value $Profile; $Profile.ssh.autoAcceptHostKey = $true }
@@ -92,18 +140,31 @@ function Connect-PSTermDevice {
     # A wide virtual screen, so a long line is not broken by the pseudo-console.
     $backend = New-PSTermBackend -Profile $Profile -Cols 250 -Rows 60 -User $user
     $encoding = if ($Profile.type -eq 'Serial') { [PSTerm.Vt.TerminalEncoding]::Latin1 } else { [PSTerm.Vt.TerminalEncoding]::Utf8 }
-    $session = New-Object PSTerm.Automation.DeviceSession($backend, (Get-PSTermDriver -Name $DriverName -Root $Root), $encoding)
+    $session = New-Object PSTerm.Automation.DeviceSession($backend, $Driver, $encoding)
+    if ($ReadOnly) { $session.MakeReadOnly() }
+    if ($Publish) { $Publish['Session'] = $session }
 
     try { $session.Connect() }
     catch { $session.Dispose(); throw }
 
-    $problem = $session.Open($user, $password, $enablePassword, [bool]$Enter, $TimeoutSec * 1000)
+    $problem = $session.Open($user, $Login.Password, $Login.EnablePassword, [bool]$Enter, $TimeoutSec * 1000)
     if ($problem) {
         $session.Dispose()
         throw "Could not log in to '$($Profile.name)': $problem"
     }
     $session.DisablePager()
     $session
+}
+function Get-PSTermSessionHostname {
+    <#
+    .SYNOPSIS
+        The device's own name, read from its prompt: "lab-core#" and "lab-core(config-if)#" are "lab-core".
+    #>
+    [CmdletBinding()]
+    param([Parameter(Mandatory)]$Session)
+    $p = [string]$Session.Prompt
+    $p = $p -replace '\(.*\)\s*[>#]\s*$', '' -replace '\s*[>#]\s*$', ''
+    $p.Trim()
 }
 
 function Disconnect-PSTermDevice {
@@ -232,8 +293,16 @@ function Get-PSTermRunningConfig {
     [CmdletBinding()]
     param([Parameter(Mandatory)]$Session, [string[]]$Volatile)
 
-    $result = $Session.Invoke('show running-config', 120000)
-    if (-not $result.Succeeded) { throw "show running-config failed: $(if ($result.TimedOut) { 'it did not finish' } else { $result.Error })" }
+    # A log message the device prints while the configuration scrolls by can cut a line in two,
+    # so a copy that saw one is taken again. A configuration never contains such a line itself.
+    $result = $null
+    for ($attempt = 1; $attempt -le 4; $attempt++) {
+        $result = $Session.Invoke('show running-config', 120000)
+        if (-not $result.Succeeded) { throw "show running-config failed: $(if ($result.TimedOut) { 'it did not finish' } else { $result.Error })" }
+        if (-not $result.NoiseSeen) { break }
+        if ($attempt -eq 4) { throw 'The device kept printing log messages into the configuration, so no clean copy could be taken. Try again in a moment.' }
+        Start-Sleep -Milliseconds 1500
+    }
 
     if (-not $Volatile) {
         $Volatile = @('^Building configuration', '^Current configuration\s*:', '^! Last configuration change', '^! NVRAM config last updated', '^! No configuration change since', '^ntp clock-period')

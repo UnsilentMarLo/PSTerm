@@ -1,0 +1,20 @@
+------------------------------------------------
+Local Intf: Gi1/0/2
+Chassis id: 0011.2233.4455
+Port id: Gi0/10
+Port Description: GigabitEthernet0/10
+System Name: dist-1.example.net
+
+System Description: 
+Cisco IOS Software, C3560CX Software (C3560CX-UNIVERSALK9-M), Version 15.2(7)E3, RELEASE SOFTWARE (fc3)
+
+Time remaining: 109 seconds
+System Capabilities: B,R
+Enabled Capabilities: B,R
+Management Addresses:
+    IP: 10.1.1.9
+Auto Negotiation - supported, enabled
+Physical media capabilities:
+    1000baseT(FD)
+
+Total entries displayed: 1

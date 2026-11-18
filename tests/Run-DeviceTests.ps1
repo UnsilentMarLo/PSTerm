@@ -306,6 +306,28 @@ Test-Case 'text without a line break is sent as it is' {
     $t.Session.Dispose()
 }
 
+Test-Case 'a paced paste in blocks sends a block together and waits for the device between blocks' {
+    $t = New-PasteSession
+    $t.Session.SendPaced("show version`rshow version`rslow`rshow version`rshow version`rshow version`r", 3)
+    Wait-NotPacing $t.Session
+    $sent = @($t.Device.Sent)
+    Assert-Equal 6 $sent.Count 'every line arrives'
+    $ticks = @($t.Device.ReceivedTicks)
+    Assert-True (($ticks[2] - $ticks[0]) -lt 600) "the first block was not sent together ($($ticks[2] - $ticks[0]) ms)"
+    Assert-True (($ticks[3] - $ticks[2]) -ge 1300) "the second block did not wait for the slow command ($($ticks[3] - $ticks[2]) ms)"
+    Assert-True (($ticks[5] - $ticks[3]) -lt 600) 'the second block was not sent together'
+    $t.Session.Dispose()
+}
+
+Test-Case 'a block size of zero or less means line by line' {
+    $t = New-PasteSession
+    $t.Session.SendPaced("show version`rslow`rshow version`r", 0)
+    Wait-NotPacing $t.Session
+    $ticks = @($t.Device.ReceivedTicks)
+    Assert-True (($ticks[2] - $ticks[1]) -ge 1300) 'a line was not held back'
+    $t.Session.Dispose()
+}
+
 Write-Host "`nConfiguration copies" -ForegroundColor Yellow
 
 $dir = Join-Path ([System.IO.Path]::GetTempPath()) ("psterm-backup-" + [guid]::NewGuid().ToString('N'))
@@ -342,7 +364,53 @@ try {
         Assert-True (Test-Path -LiteralPath $b.Path) 'no file'
         $t.Session.Dispose()
     }
-}
+
+    Write-Host "`nRead-only sessions and log messages" -ForegroundColor Yellow
+
+    Test-Case 'a read-only session sends only commands that look' {
+        $t = New-Device -Open
+        $t.Session.MakeReadOnly()
+        Assert-True $t.Session.ReadOnly 'flag'
+        foreach ($bad in 'configure terminal', 'hostname x', 'write memory', 'reload', 'erase startup-config', 'copy running-config tftp:', 'show version | redirect flash:x', 'show version | tee flash:x', "show version$([char]13)reload") {
+            $r = $t.Session.Invoke($bad, 3000)
+            Assert-True ($r.Error -match 'Refused') "'$bad' was not refused"
+        }
+        foreach ($good in 'show version', 'sh version', 'terminal length 0', 'ping 10.0.0.1', 'show running-config | include hostname') {
+            $r = $t.Session.Invoke($good, 8000)
+            Assert-True ($r.Error -notmatch 'Refused') "'$good' was refused: $($r.Error)"
+        }
+        $sent = $t.Device.Sent
+        foreach ($bad in 'configure terminal', 'hostname x', 'write memory', 'reload') { Assert-True ($sent -notcontains $bad) "the device was sent '$bad'" }
+        $raw = $false; try { $t.Session.SendRaw("reload`r") } catch { $raw = $true }
+        Assert-True $raw 'SendRaw worked'
+        $t.Session.Dispose()
+    }
+    Test-Case 'a session that is not read-only still sends everything' {
+        $t = New-Device -Open
+        Assert-True (-not $t.Session.ReadOnly) 'it was read-only'
+        Assert-True ($t.Session.Invoke('configure terminal', 5000).Error -notmatch 'Refused') 'refused'
+        $t.Session.Dispose()
+    }
+    Test-Case 'a log message among the output is noticed' {
+        $t = New-Device -Open
+        $t.Device.Canned['show clock'] = "10:00:00 UTC`n*Nov 17 10:00:00.123: %SYS-5-CONFIG_I: Configured from console by console`nmore"
+        $r = $t.Session.Invoke('show clock', 8000)
+        Assert-True $r.NoiseSeen 'not noticed'
+        $t.Device.Canned['show uptime'] = "up 3 days"
+        Assert-True (-not $t.Session.Invoke('show uptime', 8000).NoiseSeen) 'noticed where there was none'
+        $t.Session.Dispose()
+    }
+    Test-Case 'a configuration copy that saw a log message is taken again, and refused if it keeps happening' {
+        $t = New-Device -Open
+        $t.Device.Canned['show running-config'] = "hostname sw1`ninterface Gi0/1`n*Nov 17 10:00:00.123: %LINK-3-UPDOWN: Interface Gi0/1, changed state to up`nend"
+        $failed = $false
+        try { [void](Get-PSTermRunningConfig -Session $t.Session) } catch { $failed = ($_.Exception.Message -match 'log messages') }
+        Assert-True $failed 'a corrupted copy was accepted'
+        Assert-True (@($t.Device.Sent | Where-Object { $_ -eq 'show running-config' }).Count -eq 4) 'it was not tried four times'
+        $t.Device.Canned['show running-config'] = "hostname sw1`ninterface Gi0/1`nend"
+        Assert-Equal 3 @(Get-PSTermRunningConfig -Session $t.Session).Count
+        $t.Session.Dispose()
+    }}
 finally { Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue }
 
 Write-Host ""

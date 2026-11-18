@@ -51,6 +51,8 @@ function New-PSTermMainWindow {
         TreeScroll  = $null
         TreeHost    = $null
         SidebarButton = $null
+        SidebarExpand = $null
+        FindDialog  = $null
         Status      = $null
         StatusLeft  = $null
         StatusRight = $null
@@ -112,17 +114,25 @@ function New-PSTermMainWindow {
     $topBar.Height = $rowHeight + ($padY * 2)
     $topBar.Padding = New-Object System.Windows.Forms.Padding([int](8 * $scale), $padY, [int](8 * $scale), $padY)
 
-    # The sessions panel switch. The glyphs are the left and right chevrons, so it
-    # reads as "fold the panel away" / "bring it back".
-    $sidebarButton = New-Object System.Windows.Forms.Button
-    $sidebarButton.Dock = 'Fill'
-    $sidebarButton.Margin = New-Object System.Windows.Forms.Padding(0, 0, [int](6 * $scale), 0)
-    $sidebarButton.TabStop = $false
+    # The sessions panel switch lives with the panel: a chevron at the end of its search
+    # row folds it away, and a matching one at the left of the tab strip brings it back.
+    # The glyphs are the left and right chevrons.
     $iconFamily = [PSTerm.Render.IconFont]::Family
-    if ($iconFamily) {
-        $sidebarButton.Font = New-Object System.Drawing.Font($iconFamily, [float]($form.Font.SizeInPoints * 1.05))
-    }
+    $newChevron = {
+        $b = New-Object System.Windows.Forms.Button
+        $b.TabStop = $false
+        $b.Padding = New-Object System.Windows.Forms.Padding(0)
+        if ($iconFamily) { $b.Font = New-Object System.Drawing.Font($iconFamily, [float]($form.Font.SizeInPoints * 1.0)) }
+        $b
+    }.GetNewClosure()
+    $sidebarButton = & $newChevron
+    $sidebarButton.Dock = 'Right'
+    $sidebarButton.Width = $rowHeight
     $state.SidebarButton = $sidebarButton
+    $sidebarExpand = & $newChevron
+    $sidebarExpand.Dock = 'Left'
+    $sidebarExpand.Visible = $false
+    $state.SidebarExpand = $sidebarExpand
 
     $quickFrame = New-Object PSTerm.Render.FieldFrame
     $quickFrame.Dock = 'Fill'
@@ -147,20 +157,19 @@ function New-PSTermMainWindow {
 
     $topLayout = New-Object System.Windows.Forms.TableLayoutPanel
     $topLayout.Dock = 'Fill'
-    $topLayout.ColumnCount = 4
+    $topLayout.ColumnCount = 3
     $topLayout.RowCount = 1
     [void]$topLayout.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Percent', 100)))
-    [void]$topLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', [int](42 * $scale))))
     [void]$topLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Percent', 100)))
     [void]$topLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', [int](96 * $scale))))
     [void]$topLayout.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Absolute', [int](76 * $scale))))
-    $topLayout.Controls.Add($sidebarButton, 0, 0)
-    $topLayout.Controls.Add($quickFrame, 1, 0)
-    $topLayout.Controls.Add($connectButton, 2, 0)
-    $topLayout.Controls.Add($menuButton, 3, 0)
+    $topLayout.Controls.Add($quickFrame, 0, 0)
+    $topLayout.Controls.Add($connectButton, 1, 0)
+    $topLayout.Controls.Add($menuButton, 2, 0)
     $topBar.Controls.Add($topLayout)
 
-    $tips.SetTip($sidebarButton, 'Hide or show the session list (Ctrl+B).')
+    $tips.SetTip($sidebarButton, 'Hide the session list (Ctrl+B).')
+    $tips.SetTip($sidebarExpand, 'Show the session list (Ctrl+B).')
     $tips.SetTip($quickBox, 'Type where to connect and press Enter: user@host, host:2222, telnet host, COM3:115200, a saved connection name, or cmd.')
     $tips.SetTip($connectButton, 'Connect to what is typed in the box (Enter).')
     $tips.SetTip($menuButton, 'Import and export connections, credentials, settings and the About box.')
@@ -178,7 +187,7 @@ function New-PSTermMainWindow {
     [void]$ribbon.Add('Connection', 'reconnect', 'Reconnect', ([string][char]0xE72C), 'R', 'Close this session and connect again with the same settings (Ctrl+Shift+R).')
     [void]$ribbon.Add('Connection', 'duplicate', 'Duplicate', ([string][char]0xE8A7), 'D', 'Open another session to the same device in a new tab.')
     [void]$ribbon.Add('Connection', 'close',     'Close',     ([string][char]0xE711), 'X', 'Close this tab (Ctrl+Shift+W).')
-    [void]$ribbon.Add('Edit',       'copy',      'Copy',      ([string][char]0xE8C8), 'C', 'Copy the selected text. Selecting text copies it already; right-click copies too.')
+
     [void]$ribbon.Add('Edit',       'paste',     'Paste',     ([string][char]0xE77F), 'P', 'Paste the clipboard into the session (Ctrl+Shift+V, or right-click).')
     [void]$ribbon.Add('Edit',       'selectall', 'Select all', ([string][char]0xE8B3), 'A', 'Select everything in the terminal, scrollback included.')
     [void]$ribbon.Add('Terminal',   'find',      'Find',      ([string][char]0xE721), 'F', 'Search the scrollback (Ctrl+Shift+F).')
@@ -187,6 +196,9 @@ function New-PSTermMainWindow {
     [void]$ribbon.Add('Terminal',   'break',     'Break',     ([string][char]0xE7BA), 'B', 'Send a serial break (serial connections only). Used to interrupt a boot or reach a ROM monitor.')
     $credItem = $ribbon.Add('Automation', 'creds', 'Credentials', ([string][char]0xE192), 'K', 'Quick credentials: send a saved user name or password to the terminal, for example an enable password.')
     $credItem.DropDown = $true
+    # The puzzle piece exists only in the Fluent icon font (Windows 11); Windows 10's font has the pulse.
+    $pluginGlyph = if ([PSTerm.Render.IconFont]::Family -match 'Fluent') { [string][char]0xEA86 } else { [string][char]0xE9D9 }
+    [void]$ribbon.Add('Automation', 'plugins', 'Plugins', $pluginGlyph, 'P', 'Plugins: read-only checks of many devices at once - health, interfaces, optics, inventory, topology.')
     $importItem = $ribbon.Add('Sessions', 'import', 'Import', ([string][char]0xE896), 'I', 'Import connections from a CSV file, a PSTerm session file, PuTTY or ssh_config.')
     $importItem.DropDown = $true
     $exportItem = $ribbon.Add('Sessions', 'export', 'Export', ([string][char]0xE898), 'E', 'Export connections to a PSTerm session file to back them up or share them. Passwords are never included.')
@@ -224,6 +236,11 @@ function New-PSTermMainWindow {
     $state.SearchBox = $searchBox
     Set-PSTermPlaceholder -TextBox $searchBox -Theme $state.Theme -Text 'Search sessions'
     $searchHost.Controls.Add($searchFrame)
+    # Added after the search box, so it claims the right-hand end of the row first.
+    $searchGap = New-Object PSTerm.Render.ThemedPanel
+    $searchGap.Dock = 'Right'; $searchGap.Width = [int](6 * $scale)
+    $searchHost.Controls.Add($searchGap)
+    $searchHost.Controls.Add($sidebarButton)
     $tips.SetTip($searchBox, 'Filter the list by name, address or folder.')
 
     # ThemedTreeView: TreeView paints its selection bar, expander glyphs and
@@ -302,7 +319,17 @@ function New-PSTermMainWindow {
     $state.TabStrip = $tabs
     $state.TabHost = $tabHost
 
-    $tabHost.Controls.Add($tabs)
+    # The strip sits in a row of its own so the "show sessions" chevron can stand at its left
+    # end while the list is folded away.
+    $tabRow = New-Object PSTerm.Render.ThemedPanel
+    $tabRow.Dock = 'Top'
+    $tabRow.Height = $tabs.Height
+    $tabs.Dock = 'Fill'
+    $sidebarExpand.Width = $tabs.Height
+    $tabRow.Controls.Add($tabs)
+    $tabRow.Controls.Add($sidebarExpand)
+
+    $tabHost.Controls.Add($tabRow)
     $split.Panel2.Controls.Add($tabHost)
 
     # --------------------------------------------------------- status bar ----
@@ -463,6 +490,8 @@ function New-PSTermMainWindow {
         $info = Get-PSTermNodeInfo -Node $state.Tree.SelectedNode
         Invoke-PSTermNewFolder -State $state -Parent $(if ($info -and $info.Kind -eq 'f') { $info.Value } else { '' })
     }.GetNewClosure())
+    $sidebarButton.Add_Click({ Set-PSTermSidebar -State $state -Visible $false }.GetNewClosure())
+    $sidebarExpand.Add_Click({ Set-PSTermSidebar -State $state -Visible $true }.GetNewClosure())
     $editButton.Add_Click({ Invoke-PSTermEditSelected -State $state }.GetNewClosure())
     $pinButton.Add_Click({
         $info = Get-PSTermNodeInfo -Node $state.Tree.SelectedNode
@@ -551,11 +580,22 @@ function Set-PSTermSidebar {
     )
 
     if ($Toggle) { $Visible = $State.Split.Panel1Collapsed }
-    $State.Split.Panel1Collapsed = -not $Visible
 
-    # A left chevron folds the panel away; a right one brings it back.
+    # Re-laying out the window one control at a time shows every in-between state (a panel
+    # in the splitter's colour, a terminal at its old width). Paint once, when it is done.
+    [PSTerm.Render.NativeTheme]::SetRedraw($State.Form, $false)
+    try {
+        $State.Form.SuspendLayout()
+        $State.Split.Panel1Collapsed = -not $Visible
+        $State.SidebarExpand.Visible = -not $Visible
+        $State.Form.ResumeLayout($true)
+    }
+    finally { [PSTerm.Render.NativeTheme]::SetRedraw($State.Form, $true) }
+
+    # A left chevron folds the panel away; a right one, at the left of the tab strip, brings it back.
     $hasIcons = [bool][PSTerm.Render.IconFont]::Family
-    $State.SidebarButton.Text = if ($Visible) { if ($hasIcons) { ([string][char]0xE76B) } else { '<' } } else { if ($hasIcons) { ([string][char]0xE76C) } else { '>' } }
+    $State.SidebarButton.Text = if ($hasIcons) { ([string][char]0xE76B) } else { '<' }
+    $State.SidebarExpand.Text = if ($hasIcons) { ([string][char]0xE76C) } else { '>' }
 
     $item = $State.Ribbon.Find('sidebar')
     if ($item) { $item.Checked = $Visible; $State.Ribbon.Invalidate() }
@@ -586,7 +626,7 @@ function Invoke-PSTermRibbonAction {
         'reconnect' { Restart-PSTermTab -State $State }
         'duplicate' { if ($tab) { [void](New-PSTermSessionTab -State $State -Profile $tab.Profile -Temporary:([bool]$tab.Temp)) } }
         'close'     { Close-PSTermTab -State $State }
-        'copy'      { if ($terminal) { $terminal.CopySelection(); $terminal.Focus() | Out-Null } }
+
         'paste'     { if ($terminal) { $terminal.PasteClipboard(); $terminal.Focus() | Out-Null } }
         'selectall' { if ($terminal) { $terminal.SelectAll(); $terminal.Focus() | Out-Null } }
         'find'      { Show-PSTermFind -State $State }
@@ -594,6 +634,7 @@ function Invoke-PSTermRibbonAction {
         'reset'     { if ($terminal) { $terminal.ResetTerminal(); $terminal.Focus() | Out-Null } }
         'break'     { Invoke-PSTermSendBreak -State $State }
         'creds'     { Show-PSTermCredentialMenu -State $State -Location $Location }
+        'plugins'   { Show-PSTermPluginDialog -State $State }
         'import'    { Show-PSTermImportMenu -State $State -Location $Location }
         'export'    { Show-PSTermExportMenu -State $State -Location $Location }
         'sidebar'   { Set-PSTermSidebar -State $State -Visible ([bool]$State.Ribbon.Find('sidebar').Checked) }
@@ -787,17 +828,23 @@ function Update-PSTermTree {
 function Update-PSTermTreeButtons {
     <#
     .SYNOPSIS
-        Keep the Pin / Unpin button's caption and state in step with the selection.
+        Keep the Edit, Pin / Unpin and Delete buttons in step with the selection.
     #>
     param([Parameter(Mandatory)]$State)
     $info = Get-PSTermNodeInfo -Node $State.Tree.SelectedNode
+    $isProfile = [bool]($info -and $info.Kind -eq 'p')
+    $isFolder = [bool]($info -and $info.Kind -eq 'f')
     foreach ($control in $State.TreeHost.Parent.Controls) {
         if ($control -is [System.Windows.Forms.TableLayoutPanel]) {
             foreach ($button in $control.Controls) {
-                if ($button.Text -in @('Pin', 'Unpin')) {
-                    $isProfile = [bool]($info -and $info.Kind -eq 'p')
-                    $button.Enabled = $isProfile
-                    $button.Text = if ($isProfile -and (Test-PSTermPinned -Store $State.Store -Id $info.Value)) { 'Unpin' } else { 'Pin' }
+                # A button that has nothing to act on is dimmed, whichever button it is.
+                switch ($button.Text) {
+                    { $_ -in @('Pin', 'Unpin') } {
+                        $button.Enabled = $isProfile
+                        $button.Text = if ($isProfile -and (Test-PSTermPinned -Store $State.Store -Id $info.Value)) { 'Unpin' } else { 'Pin' }
+                    }
+                    'Edit' { $button.Enabled = ($isProfile -or $isFolder) }
+                    'Delete' { $button.Enabled = ($isProfile -or $isFolder) }
                 }
             }
         }
@@ -1401,7 +1448,11 @@ function New-PSTermSessionTab {
         if (-not $session) { return }
 
         if ($e.IsPaste) {
-            if (Test-PSTermPacePaste -State $State -Tab $tab -Text $e.Text) { $session.SendPaced($e.Text); return }
+            if (Test-PSTermPacePaste -State $State -Tab $tab -Text $e.Text) {
+                $lines = [int](Import-PSTermSettings -Root $State.Root).pacePasteLines
+                $session.SendPaced($e.Text, [Math]::Max(1, $lines))
+                return
+            }
         }
         elseif (-not $e.IsReply -and $session.IsPacing) {
             # Typing while a paste is being fed in means the operator wants it stopped.
@@ -1448,7 +1499,7 @@ function New-PSTermSessionTab {
 function Test-PSTermPacePaste {
     <#
     .SYNOPSIS
-        Whether a paste into this tab should be fed to the device line by line.
+        Whether a paste into this tab should be fed to the device in paced blocks.
     #>
     param([Parameter(Mandatory)]$State, [Parameter(Mandatory)]$Tab, [string]$Text = '')
 
@@ -2005,9 +2056,11 @@ function Update-PSTermStatus {
         $live = $has -and -not $tab.Closed
         $serial = $has -and $tab.Profile.type -eq 'Serial' -and $live
         foreach ($key in 'reconnect', 'duplicate', 'close', 'paste', 'selectall', 'find', 'clear', 'reset') { $ribbon.SetEnabled($key, $has) }
-        $ribbon.SetEnabled('copy', ($has -and $tab.Control.HasSelection))
+
         $ribbon.SetEnabled('break', $serial)
-        $ribbon.SetEnabled('creds', $live)
+        # Always on: the menu is also where the credentials are managed, and that does not need a
+        # connection. Only the "send" entries inside it depend on a live session.
+        $ribbon.SetEnabled('creds', $true)
     }
 
     if (-not $tab) {

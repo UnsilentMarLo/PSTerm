@@ -16,6 +16,7 @@ using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
 using System.Drawing.Text;
 using System.Runtime.InteropServices;
 using System.Text;
@@ -83,10 +84,49 @@ namespace PSTerm.Render
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool DeleteObject(IntPtr obj);
 
+        /// <summary>
+        /// dx gives the distance from each character to the next, so every glyph lands
+        /// exactly on its cell whatever the font's own advance is.
+        /// </summary>
         [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
         [return: MarshalAs(UnmanagedType.Bool)]
         internal static extern bool ExtTextOut(IntPtr hdc, int x, int y, uint options,
-                                               IntPtr rect, string text, uint count, IntPtr dx);
+                                               IntPtr rect, string text, uint count, int[] dx);
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct SIZE { public int cx; public int cy; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        internal struct BITMAPINFOHEADER
+        {
+            public int biSize; public int biWidth; public int biHeight; public short biPlanes; public short biBitCount;
+            public int biCompression; public int biSizeImage; public int biXPelsPerMeter; public int biYPelsPerMeter;
+            public int biClrUsed; public int biClrImportant;
+        }
+
+        [DllImport("gdi32.dll")]
+        internal static extern IntPtr CreateCompatibleDC(IntPtr hdc);
+
+        [DllImport("gdi32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool DeleteDC(IntPtr hdc);
+
+        [DllImport("gdi32.dll")]
+        internal static extern IntPtr CreateDIBSection(IntPtr hdc, ref BITMAPINFOHEADER bmi, uint usage, out IntPtr bits, IntPtr section, uint offset);
+
+        [DllImport("gdi32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool BitBlt(IntPtr dest, int x, int y, int w, int h, IntPtr src, int sx, int sy, uint rop);
+
+        [DllImport("gdi32.dll")]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GdiFlush();
+
+        internal const uint SRCCOPY = 0x00CC0020;
+
+        [DllImport("gdi32.dll", CharSet = CharSet.Unicode)]
+        [return: MarshalAs(UnmanagedType.Bool)]
+        internal static extern bool GetTextExtentPoint32(IntPtr hdc, string text, int length, out SIZE size);
 
         /// <summary>GDI wants colours as 0x00BBGGRR, the reverse of ARGB.</summary>
         internal static int ToColorRef(Color c)
@@ -119,6 +159,7 @@ namespace PSTerm.Render
             public int X;
             public int Y;
             public string Text;
+            public int[] Dx;
             public Font Font;
             public Color Colour;
         }
@@ -140,7 +181,15 @@ namespace PSTerm.Render
 
         private readonly Timer _renderTimer;
         private volatile bool _needsPaint;
+        // The back buffer is a DIB section: GDI+ draws shapes into it through _backBuffer, and text
+        // is drawn with GDI straight into the same memory through _backDc. A GDI+ bitmap would
+        // have to be copied in and out of a device context for every frame of text (about 70 ms
+        // for a large window), which is what made typing lag.
         private Bitmap _backBuffer;
+        private IntPtr _backDib = IntPtr.Zero;
+        private IntPtr _backDc = IntPtr.Zero;
+        private IntPtr _backOld = IntPtr.Zero;
+        private int _backWidth, _backHeight;
         private bool _backBufferValid;
 
         // ---- viewport / scrollback -------------------------------------------
@@ -277,48 +326,45 @@ namespace PSTerm.Render
         private void FlushText(Graphics g)
         {
             if (_pendingText.Count == 0) return;
+            if (_backDc == IntPtr.Zero) { _pendingText.Clear(); return; }
 
-            IntPtr hdc = g.GetHdc();
-            try
+            // Shapes drawn through GDI+ must have landed before GDI writes into the same memory.
+            g.Flush(System.Drawing.Drawing2D.FlushIntention.Sync);
+
+            IntPtr hdc = _backDc;
+            Gdi.SetBkMode(hdc, Gdi.TRANSPARENT);
+
+            Font currentFont = null;
+            int currentColour = -1;
+            IntPtr previousFont = IntPtr.Zero;
+            bool first = true;
+
+            for (int i = 0; i < _pendingText.Count; i++)
             {
-                Gdi.SetBkMode(hdc, Gdi.TRANSPARENT);
+                TextRun run = _pendingText[i];
 
-                Font currentFont = null;
-                int currentColour = -1;
-                IntPtr previousFont = IntPtr.Zero;
-                bool first = true;
-
-                for (int i = 0; i < _pendingText.Count; i++)
+                if (!ReferenceEquals(run.Font, currentFont))
                 {
-                    TextRun run = _pendingText[i];
-
-                    if (!ReferenceEquals(run.Font, currentFont))
-                    {
-                        IntPtr selected = Gdi.SelectObject(hdc, GetFontHandle(run.Font));
-                        if (first) { previousFont = selected; first = false; }
-                        currentFont = run.Font;
-                    }
-
-                    int colour = Gdi.ToColorRef(run.Colour);
-                    if (colour != currentColour)
-                    {
-                        Gdi.SetTextColor(hdc, colour);
-                        currentColour = colour;
-                    }
-
-                    Gdi.ExtTextOut(hdc, run.X, run.Y, 0, IntPtr.Zero,
-                                   run.Text, (uint)run.Text.Length, IntPtr.Zero);
+                    IntPtr selected = Gdi.SelectObject(hdc, GetFontHandle(run.Font));
+                    if (first) { previousFont = selected; first = false; }
+                    currentFont = run.Font;
                 }
 
-                if (previousFont != IntPtr.Zero) Gdi.SelectObject(hdc, previousFont);
-            }
-            finally
-            {
-                g.ReleaseHdc(hdc);
-                _pendingText.Clear();
-            }
-        }
+                int colour = Gdi.ToColorRef(run.Colour);
+                if (colour != currentColour)
+                {
+                    Gdi.SetTextColor(hdc, colour);
+                    currentColour = colour;
+                }
 
+                Gdi.ExtTextOut(hdc, run.X, run.Y, 0, IntPtr.Zero,
+                               run.Text, (uint)run.Text.Length, run.Dx);
+            }
+
+            if (previousFont != IntPtr.Zero) Gdi.SelectObject(hdc, previousFont);
+            Gdi.GdiFlush();
+            _pendingText.Clear();
+        }
         public TerminalEmulator Terminal { get { return _term; } }
 
         /// <summary>Lock this around any access to the emulator from another thread.</summary>
@@ -578,6 +624,32 @@ namespace PSTerm.Render
             }
 
             _cellWidth = Math.Max(1, size.Width);
+
+            // The text is drawn with a GDI font made by Font.ToHfont(), and GDI rounds the
+            // height of that font its own way, which can differ by a pixel from the font
+            // TextRenderer measured with. A cell one pixel too wide or narrow puts the
+            // cursor further from the text with every character on the line. Measure
+            // with the handle that is used for drawing.
+            if (IsHandleCreated)
+            {
+                try
+                {
+                    using (Graphics g2 = CreateGraphics())
+                    {
+                        IntPtr hdc = g2.GetHdc();
+                        try
+                        {
+                            IntPtr old = Gdi.SelectObject(hdc, GetFontHandle(_font));
+                            Gdi.SIZE ext;
+                            if (Gdi.GetTextExtentPoint32(hdc, "WWWWWWWWWWWWWWWW", 16, out ext) && ext.cx > 0)
+                                _cellWidth = Math.Max(1, (int)Math.Round(ext.cx / 16.0));
+                            Gdi.SelectObject(hdc, old);
+                        }
+                        finally { g2.ReleaseHdc(hdc); }
+                    }
+                }
+                catch (Exception) { }
+            }
             _baselineOffset = 0;
         }
 
@@ -752,7 +824,32 @@ namespace PSTerm.Render
             // screen; none of those pass through the scroll bar, so it is brought
             // up to date here. Without this the bar never appeared on its own.
             UpdateScrollBar();
-            Invalidate();
+
+            // Only the rows that changed need to reach the screen: blitting the whole back
+            // buffer for one typed character is what made typing lag on a large window.
+            Rectangle dirty = Rectangle.Empty;
+            bool whole = !_backBufferValid || _scrollOffset != 0;
+            if (!whole)
+            {
+                int first = int.MaxValue, last = -1;
+                lock (_sync)
+                {
+                    ScreenBuffer screen = _term.Screen;
+                    int rows = screen.Rows;
+                    for (int r = 0; r < rows; r++)
+                    {
+                        if (screen.IsDirty(r) || r == _term.CursorY || r == _paintedCursorRow)
+                        {
+                            if (r < first) first = r;
+                            if (r > last) last = r;
+                        }
+                    }
+                }
+                if (last >= 0) dirty = new Rectangle(0, first * _cellHeight, ClientSize.Width, (last - first + 1) * _cellHeight);
+            }
+
+            if (whole) Invalidate();
+            else if (!dirty.IsEmpty) Invalidate(dirty);
         }
 
         private void OnBlinkTick(object sender, EventArgs e)
@@ -789,7 +886,38 @@ namespace PSTerm.Render
                 _backBuffer.Dispose();
                 _backBuffer = null;
             }
+            if (_backDc != IntPtr.Zero)
+            {
+                if (_backOld != IntPtr.Zero) Gdi.SelectObject(_backDc, _backOld);
+                Gdi.DeleteDC(_backDc);
+                _backDc = IntPtr.Zero; _backOld = IntPtr.Zero;
+            }
+            if (_backDib != IntPtr.Zero) { Gdi.DeleteObject(_backDib); _backDib = IntPtr.Zero; }
             _backBufferValid = false;
+        }
+
+        private void CreateBackBuffer(int width, int height)
+        {
+            Gdi.BITMAPINFOHEADER bmi = new Gdi.BITMAPINFOHEADER();
+            bmi.biSize = Marshal.SizeOf(typeof(Gdi.BITMAPINFOHEADER));
+            bmi.biWidth = width;
+            bmi.biHeight = -height;          // top-down, like a GDI+ bitmap
+            bmi.biPlanes = 1;
+            bmi.biBitCount = 32;
+            bmi.biCompression = 0;           // BI_RGB
+
+            IntPtr bits;
+            _backDc = Gdi.CreateCompatibleDC(IntPtr.Zero);
+            _backDib = Gdi.CreateDIBSection(IntPtr.Zero, ref bmi, 0, out bits, IntPtr.Zero, 0);
+            if (_backDc == IntPtr.Zero || _backDib == IntPtr.Zero || bits == IntPtr.Zero)
+            {
+                DisposeBackBuffer();
+                throw new InvalidOperationException("Could not create the terminal back buffer.");
+            }
+            _backOld = Gdi.SelectObject(_backDc, _backDib);
+            // 32bppRgb: the alpha byte is ignored, which suits memory GDI also writes into.
+            _backBuffer = new Bitmap(width, height, width * 4, PixelFormat.Format32bppRgb, bits);
+            _backWidth = width; _backHeight = height;
         }
 
         protected override void OnPaintBackground(PaintEventArgs e)
@@ -815,10 +943,10 @@ namespace PSTerm.Render
             int height = ClientSize.Height;
             if (width <= 0 || height <= 0) return;
 
-            if (_backBuffer == null || _backBuffer.Width != width || _backBuffer.Height != height)
+            if (_backBuffer == null || _backWidth != width || _backHeight != height)
             {
                 DisposeBackBuffer();
-                _backBuffer = new Bitmap(width, height);
+                CreateBackBuffer(width, height);
                 _backBufferValid = false;
             }
 
@@ -831,7 +959,14 @@ namespace PSTerm.Render
             }
             _backBufferValid = true;
 
-            e.Graphics.DrawImageUnscaled(_backBuffer, 0, 0);
+            // Copy only the part of the window that is being repainted.
+            Rectangle clip = Rectangle.Intersect(e.ClipRectangle, new Rectangle(0, 0, width, height));
+            if (clip.Width > 0 && clip.Height > 0)
+            {
+                IntPtr dest = e.Graphics.GetHdc();
+                try { Gdi.BitBlt(dest, clip.X, clip.Y, clip.Width, clip.Height, _backDc, clip.X, clip.Y, Gdi.SRCCOPY); }
+                finally { e.Graphics.ReleaseHdc(dest); }
+            }
         }
 
         private void RenderScreen(Graphics g, bool full)
@@ -928,6 +1063,7 @@ namespace PSTerm.Render
             // Pass 2: glyph runs sharing font and colour.
             c = 0;
             StringBuilder run = new StringBuilder(cols);
+            int[] dxBuf = new int[cols + 1];
             while (c < cols)
             {
                 Cell cell = line.Cells[c];
@@ -950,7 +1086,9 @@ namespace PSTerm.Render
 
                 int start = c;
                 run.Length = 0;
+                int nDx = 0;
                 run.Append(cell.Ch == '\0' ? ' ' : cell.Ch);
+                dxBuf[nDx++] = ((cell.Flags & CellFlags.WideLead) != 0 ? 2 : 1) * _cellWidth;
                 CellFlags styleFlags = cell.Flags;
                 c++;
 
@@ -968,15 +1106,18 @@ namespace PSTerm.Render
                         (styleFlags & (CellFlags.Underline | CellFlags.DoubleUnderline | CellFlags.Strikethrough))) break;
 
                     run.Append(next.Ch == '\0' ? ' ' : next.Ch);
+                    dxBuf[nDx++] = ((next.Flags & CellFlags.WideLead) != 0 ? 2 : 1) * _cellWidth;
                     c++;
                 }
 
-                DrawRun(g, run.ToString(), start, y, fore, font, styleFlags, c - start);
+                int[] dx = new int[nDx];
+                Array.Copy(dxBuf, dx, nDx);
+                DrawRun(g, run.ToString(), start, y, fore, font, styleFlags, c - start, dx);
             }
         }
 
         private void DrawRun(Graphics g, string text, int startCol, int y, Color fore, Font font,
-                             CellFlags flags, int cellSpan)
+                             CellFlags flags, int cellSpan, int[] dx)
         {
             if (text.Length == 0) return;
 
@@ -996,6 +1137,7 @@ namespace PSTerm.Render
                 run.X = x;
                 run.Y = y + _baselineOffset;
                 run.Text = text;
+                run.Dx = dx;
                 run.Font = font;
                 run.Colour = fore;
                 _pendingText.Add(run);
@@ -1079,6 +1221,7 @@ namespace PSTerm.Render
                 run.X = x;
                 run.Y = y + _baselineOffset;
                 run.Text = ch.ToString();
+                run.Dx = new int[] { _cellWidth };
                 run.Font = FontFor(cell.Flags);
                 run.Colour = _palette.CursorTextColor;
                 _pendingText.Add(run);

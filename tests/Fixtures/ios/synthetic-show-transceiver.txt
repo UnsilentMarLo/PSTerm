@@ -1,0 +1,11 @@
+If device is externally calibrated, only calibrated values are printed.
+++ : high alarm, +  : high warning, -  : low warning, -- : low alarm.
+NA or N/A: not applicable, Tx3: Tx lane 3 (SFP+ n/a)
+
+                                 Optical   Optical
+           Temperature  Voltage  Tx Power  Rx Power
+Port       (Celsius)    (Volts)  (dBm)     (dBm)
+---------  -----------  -------  --------  --------
+Gi1/0/25   32.5         3.30     -5.4      -6.8
+Gi1/0/26   41.0         3.28     -2.1      -26.7 --
+Te1/1/1    N/A          N/A      N/A       N/A

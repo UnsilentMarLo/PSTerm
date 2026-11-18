@@ -1,0 +1,9 @@
+{
+  "title": "Inventory",
+  "description": "Model, serial number, software version, uptime and the reason for the last restart, one row per device - or one row per part with the parts option.",
+  "version": "1.0",
+  "timeoutSec": 60,
+  "parameters": {
+    "IncludeParts": { "label": "One row per part" }
+  }
+}

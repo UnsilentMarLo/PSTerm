@@ -1,0 +1,23 @@
+-------------------------
+Device ID: lab-edge.lab.local
+Entry address(es):
+  IP address: 192.168.77.2
+Platform: cisco CMICR-4PS,  Capabilities: Switch IGMP
+Interface: GigabitEthernet0/10,  Port ID (outgoing port): GigabitEthernet1/0/1
+Holdtime : 133 sec
+
+Version :
+Cisco IOS Software, CMICR Software (CMICR-UNIVERSALK9-M), Version 15.2(8)E3, RELEASE SOFTWARE (fc2)
+Technical Support: http://www.cisco.com/techsupport
+Copyright (c) 1986-2022 by Cisco Systems, Inc.
+Compiled Mon 14-Nov-22 07:40 by mcpre
+
+advertisement version: 2
+VTP Management Domain: ''
+Native VLAN: 1
+Duplex: full
+Management address(es):
+  IP address: 192.168.77.2
+
+
+Total cdp entries displayed : 1

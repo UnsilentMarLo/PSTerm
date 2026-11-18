@@ -1,0 +1,10 @@
+{
+  "title": "Neighbours and topology",
+  "description": "Who each device is connected to, from CDP and LLDP. Select several devices and the links are put together into a diagram you can save as SVG or PNG.",
+  "version": "1.0",
+  "timeoutSec": 60,
+  "topology": true,
+  "parameters": {
+    "IncludeLldp": { "label": "Also ask LLDP" }
+  }
+}

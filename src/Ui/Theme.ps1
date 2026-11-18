@@ -256,6 +256,14 @@ function Set-PSTermFormTheme {
             $Control.BorderStyle = 'None'
             [PSTerm.Render.NativeTheme]::UseDarkScrollBars($Control)
         }
+        ($Control -is [System.Windows.Forms.DataGridView]) {
+            Set-PSTermGridTheme -Grid $Control -Theme $Theme
+            return
+        }
+        ($Control -is [System.Windows.Forms.PictureBox]) {
+            $Control.BackColor = $Theme.Surface
+            return
+        }
         ($Control -is [System.Windows.Forms.Button]) {
             $Control.BackColor = $Theme.Field
             $Control.ForeColor = $Theme.Text
@@ -272,7 +280,9 @@ function Set-PSTermFormTheme {
         }
         ($Control -is [System.Windows.Forms.Label]) {
             $Control.BackColor = [System.Drawing.Color]::Transparent
-            $Control.ForeColor = $Theme.Text
+            # A label tagged "muted" is secondary text (a hint, a status line); the walk
+            # used to flatten it to the main text colour.
+            $Control.ForeColor = $(if ($Control.Tag -eq 'muted') { $Theme.TextMuted } else { $Theme.Text })
         }
         ($Control -is [System.Windows.Forms.SplitContainer]) {
             $Control.BackColor = $Theme.Border
@@ -330,6 +340,25 @@ function New-PSTermMenu {
     $menu.ForeColor = $Theme.Text
     $menu.Font = New-PSTermFont
     $menu.ShowImageMargin = $false
+
+    # The system draws a menu item's tooltip itself, in white. Show the application's own
+    # tip instead, beside the pointer like every other tip.
+    $menu.ShowItemToolTips = $false
+    $tip = New-Object PSTerm.Render.ThemedToolTip
+    $tip.Apply((New-PSTermControlTheme -Theme $Theme))
+    $menu.Add_ItemAdded({
+        param($sender, $e)
+        # Local copies: a closure made here keeps this scope's variables, not the enclosing one's.
+        $ownerMenu = $sender
+        $ownerTip = $tip
+        $e.Item.Add_MouseEnter({
+            param($item, $args2)
+            if ($item.Enabled -and $item.ToolTipText) { $ownerTip.ShowAt($ownerMenu, $item.ToolTipText, [System.Drawing.Point]::Empty) }
+        }.GetNewClosure())
+        $e.Item.Add_MouseLeave({ $ownerTip.Hide($ownerMenu) }.GetNewClosure())
+    }.GetNewClosure())
+    $menu.Add_Closed({ $tip.Hide($menu) }.GetNewClosure())
+    $menu.Add_Disposed({ $tip.Dispose() }.GetNewClosure())
     $menu
 }
 

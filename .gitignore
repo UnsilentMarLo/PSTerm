@@ -14,6 +14,7 @@ Profiles/credentials.dat
 Profiles/*.v1-backup
 Profiles/*.corrupt-*
 Profiles/settings.json
+Profiles/plugin-approvals.json
 
 # Saved connections hold real hostnames and usernames. The app creates a starter
 # file on first run, so there is nothing to ship.

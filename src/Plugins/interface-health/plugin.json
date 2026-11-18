@@ -1,0 +1,9 @@
+{
+  "title": "Interface health",
+  "description": "Link state, speed and error counters for every interface. Marks interfaces with CRC or other errors, drops, or a link running at half duplex.",
+  "version": "1.0",
+  "timeoutSec": 120,
+  "parameters": {
+    "MinErrors": { "label": "Errors that count as a problem" }
+  }
+}

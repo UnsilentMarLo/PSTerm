@@ -65,6 +65,14 @@ namespace PSTerm.Automation
         public string PasswordPromptPattern = @"(password|passphrase|passcode)[^:\r\n]*:\s*$";
         public string UserNamePromptPattern = @"(user ?name|login)[^:\r\n]*:\s*$";
 
+        /// <summary>
+        /// What a read-only session may send: commands that only look. Anything else is
+        /// refused before it reaches the device. The deny pattern catches the ways a
+        /// "show" can still write (piping its output to a file on the device).
+        /// </summary>
+        public string ReadOnlyPattern = @"^\s*(s(h(o(w)?)?)?|ping|traceroute|terminal\s+(length|width)\s+\d+|dir|more|verify)(\s|$)";
+        public string ReadOnlyDenyPattern = @"\|\s*(redirect|tee|append)\b|[\x00-\x1f]";
+
         public string EnableCommand = "enable";
         public string ConfigureCommand = "configure terminal";
         public string EndConfigCommand = "end";
@@ -80,6 +88,12 @@ namespace PSTerm.Automation
         public string[] Lines = new string[0];
         public string Prompt = "";
         public bool TimedOut;
+        /// <summary>
+        /// A message the device printed on its own (a log line) arrived while the command ran, so the
+        /// output may have a line cut in two. Harmless for most commands; a configuration copy is
+        /// taken again when it happens.
+        /// </summary>
+        public bool NoiseSeen;
         /// <summary>The first line of output that matched the driver's error pattern.</summary>
         public string Error = "";
         public bool Succeeded { get { return !TimedOut && Error.Length == 0; } }
@@ -91,6 +105,9 @@ namespace PSTerm.Automation
         private readonly ITerminalBackend _backend;
         private readonly StreamDecoder _decoder;
         private readonly DeviceDriver _driver;
+        private readonly Regex _readOnlyAllow, _readOnlyDeny;
+        private readonly List<string> _sent = new List<string>();
+        private volatile bool _readOnly;
         private readonly Regex _noise, _prompt, _user, _privileged, _config, _pager, _error, _confirm, _yesNo, _passwordPrompt, _userPrompt;
 
         private readonly object _gate = new object();
@@ -124,6 +141,8 @@ namespace PSTerm.Automation
             _yesNo = new Regex(_driver.YesNoPattern, o);
             _passwordPrompt = new Regex(_driver.PasswordPromptPattern, o);
             _userPrompt = new Regex(_driver.UserNamePromptPattern, o);
+            _readOnlyAllow = new Regex(_driver.ReadOnlyPattern, o);
+            _readOnlyDeny = new Regex(_driver.ReadOnlyDenyPattern, RegexOptions.IgnoreCase);
 
             _backend.DataReceived += OnData;
             _backend.Closed += OnClosed;
@@ -239,7 +258,22 @@ namespace PSTerm.Automation
         }
 
         /// <summary>Send text exactly as given, with no wait.</summary>
-        public void SendRaw(string text) { Write(text); }
+        /// <summary>
+        /// A read-only session sends only commands that look and never change anything:
+        /// the check is here, in the engine, so a script cannot talk its way around it.
+        /// It can be turned on, never off again.
+        /// </summary>
+        public bool ReadOnly { get { return _readOnly; } }
+        public void MakeReadOnly() { _readOnly = true; }
+
+        /// <summary>Every command this session sent through Invoke, in order (for an audit log).</summary>
+        public string[] SentCommands { get { lock (_sent) { return _sent.ToArray(); } } }
+
+        public void SendRaw(string text)
+        {
+            if (_readOnly) throw new InvalidOperationException("This session is read-only: raw input is not allowed.");
+            Write(text);
+        }
 
         // =====================================================================
         // Waiting
@@ -334,8 +368,12 @@ namespace PSTerm.Automation
 
         private void WaitForChange(int ms)
         {
-            _signal.Reset();
-            _signal.WaitOne(ms);
+            try
+            {
+                _signal.Reset();
+                _signal.WaitOne(ms);
+            }
+            catch (ObjectDisposedException) { _closed = true; }
         }
 
         // =====================================================================
@@ -350,7 +388,8 @@ namespace PSTerm.Automation
         public string Open(string user, string password, string enablePassword, bool enter, int timeoutMs)
         {
             int start = Environment.TickCount;
-            bool sentUser = false, sentPassword = false, sentEnable = false, enableAsked = false, wokeConsole = false, answeredLeftover = false;
+            bool sentUser = false, sentPassword = false, sentEnable = false, enableAsked = false, answeredLeftover = false;
+            int lastWake = unchecked(start - 10000);
 
             while (unchecked(Environment.TickCount - start) < timeoutMs)
             {
@@ -408,10 +447,13 @@ namespace PSTerm.Automation
                     break;
                 }
 
-                if (pending.Length == 0 && !wokeConsole && QuietMs >= 400)
+                if (pending.Length == 0 && QuietMs >= 400 && unchecked(Environment.TickCount - lastWake) >= 1500)
                 {
-                    // A serial console showing nothing is usually waiting for a key.
-                    wokeConsole = true;
+                    // A serial console showing nothing is usually waiting for a key. Asked again
+                    // every so often: the first key can arrive before the console is listening
+                    // (a USB console prints its "media type" message after it is opened), and a
+                    // message the device prints by itself does not bring the prompt back.
+                    lastWake = Environment.TickCount;
                     Write("\r");
                     WaitForChange(500);
                     continue;
@@ -447,6 +489,16 @@ namespace PSTerm.Automation
         public CommandResult Invoke(string command, int timeoutMs, bool autoConfirm, string yesNoReply)
         {
             if (command == null) command = "";
+
+            if (_readOnly && (!_readOnlyAllow.IsMatch(command) || _readOnlyDeny.IsMatch(command)))
+            {
+                CommandResult refused = new CommandResult();
+                refused.Command = command;
+                refused.Error = "% Refused: this session is read-only and only sends commands that look at the device.";
+                lock (_sent) { _sent.Add("(refused) " + command); }
+                return refused;
+            }
+            lock (_sent) { _sent.Add(command); }
             int first;
 
             // Let the device finish whatever it was doing before the command goes in.
@@ -475,7 +527,8 @@ namespace PSTerm.Automation
 
             foreach (string line in result.Lines)
             {
-                if (_error.IsMatch(line)) { result.Error = line.Trim(); break; }
+                if (_noise.IsMatch(line.Trim())) result.NoiseSeen = true;
+                if (result.Error.Length == 0 && _error.IsMatch(line)) result.Error = line.Trim();
             }
 
             // Output is trimmed of the blank lines a device puts around it.
@@ -495,6 +548,18 @@ namespace PSTerm.Automation
         public void DisablePager()
         {
             if (_driver.DisablePagerCommand.Length > 0) Invoke(_driver.DisablePagerCommand, 5000);
+        }
+
+        /// <summary>
+        /// Let go of the session without waiting. Whoever is blocked on it is woken at once and
+        /// sees it closed; the transport itself is closed on another thread, because closing a
+        /// serial port or a pseudo-console can take a long time and must not hold up a window.
+        /// </summary>
+        public void Abandon()
+        {
+            _closed = true;
+            try { _signal.Set(); } catch (ObjectDisposedException) { }
+            ThreadPool.QueueUserWorkItem(delegate { try { Dispose(); } catch (Exception) { } });
         }
 
         public void Dispose()

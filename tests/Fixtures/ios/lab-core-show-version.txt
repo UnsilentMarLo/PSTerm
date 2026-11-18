@@ -1,0 +1,65 @@
+Cisco IOS Software, C3560CX Software (C3560CX-UNIVERSALK9-M), Version 15.2(7)E3, RELEASE SOFTWARE (fc3)
+Technical Support: http://www.cisco.com/techsupport
+Copyright (c) 1986-2020 by Cisco Systems, Inc.
+Compiled Sun 06-Sep-20 15:15 by prod_rel_team
+
+ROM: Bootstrap program is C3560CX boot loader
+BOOTLDR: C3560CX Boot Loader (C3560CX-HBOOT-M) Version 15.2(6r)E, RELEASE SOFTWARE (fc1)
+
+lab-core uptime is 14 minutes
+System returned to ROM by power-on
+System restarted at 05:11:48 UTC Wed Nov 18 2026
+System image file is "flash:/c3560cx-universalk9-mz.152-7.E3.bin"
+Last reload reason: power-on
+
+
+
+This product contains cryptographic features and is subject to United
+States and local country laws governing import, export, transfer and
+use. Delivery of Cisco cryptographic products does not imply
+third-party authority to import, export, distribute or use encryption.
+Importers, exporters, distributors and users are responsible for
+compliance with U.S. and local country laws. By using this product you
+agree to comply with applicable laws and regulations. If you are unable
+to comply with U.S. and local laws, return this product immediately.
+
+A summary of U.S. laws governing Cisco cryptographic products may be found at:
+http://www.cisco.com/wwl/export/crypto/tool/stqrg.html
+
+If you require further assistance please contact us by sending email to
+export@cisco.com.
+
+License Level: ipbase
+License Type: Default. No valid license found.
+Next reload license Level: ipbase
+
+cisco WS-C3560CX-8PC-S (APM86XXX) processor (revision Q0) with 524288K bytes of memory.
+Processor board ID FOCXXXXXXXXXX
+Last reset from power-on
+1 Virtual Ethernet interface
+12 Gigabit Ethernet interfaces
+The password-recovery mechanism is enabled.
+
+512K bytes of flash-simulated non-volatile configuration memory.
+Base ethernet MAC Address       : 84:EB:EF:C3:72:80
+Motherboard assembly number     : 73-100859-04
+Power supply part number        : 341-0675-02
+Motherboard serial number       : FOCXXXXXXXXXX
+Power supply serial number      : DCCXXXXXXXXXX
+Model revision number           : Q0
+Motherboard revision number     : E0
+Model number                    : WS-C3560CX-8PC-S
+System serial number            : FOCXXXXXXXXXX
+Top Assembly Part Number        : 68-100567-01
+Top Assembly Revision Number    : K0
+Version ID                      : V03
+CLEI Code Number                : CMM1S10DRB
+Hardware Board Revision Number  : 0x09
+
+
+Switch Ports Model                     SW Version            SW Image
+------ ----- -----                     ----------            ----------
+*    1 12    WS-C3560CX-8PC-S          15.2(7)E3             C3560CX-UNIVERSALK9-M
+
+
+Configuration register is 0xF

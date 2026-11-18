@@ -120,9 +120,38 @@ dealt with; a line the device refuses is reported in the device's own words. `-S
 `reload in N` first and cancels it only if the change left the device reachable, so a
 change that cuts the way in undoes itself. `Backups` keeps dated copies and says which lines
 changed. Devices are described by a driver file (`src\Drivers\cisco-ios.json`).
-Pasting several lines can be fed in one line at a time, waiting for the prompt each time
-(Settings, *Paced paste*, off by default): it is slower, and a plain paste lost nothing on the
-Catalyst switches it was tried on, but a console that does drop characters needs it.
+Pasting several lines can be fed to the device a few at a time, waiting for its prompt each
+time (Settings, *Paced paste*: Off, Serial or All; and *Paste in blocks of*: line by line, 5, 10,
+20 or 50 lines). Off by default; turn it on for a console that drops characters when a block
+arrives at full speed.
+
+**Plugins**
+
+*Plugins...* in the menu opens a window that runs a small script against many devices at
+once and shows what comes back as a table you can sort and save as CSV. Pick a plugin, fill in
+its form, pick devices (or a whole folder with the filter), and Run. Five ship with PSTerm,
+all read-only:
+
+| Plugin | What it gives you |
+|---|---|
+| Device health | one row per device: processor, memory, uptime, last restart, ports connected or in trouble |
+| Interface health | link state, speed and error counters per interface, with CRC, drops and half duplex marked |
+| Transceiver levels | light levels, temperature and voltage of optical modules, with alarm marks and a low-light check |
+| Inventory | model, serial number, software version (or one row per part) |
+| Neighbours and topology | CDP and LLDP neighbours; with several devices selected, a diagram of the links, saved as SVG or PNG |
+
+The window is opened by the **Plugins** button on the toolbar (or the menu). Its device list holds
+your saved connections and the serial ports PSTerm has detected; a port that a tab already has
+open is marked, because a port can be opened only once.
+
+Up to ten devices are asked at once (a field in the window); a device that fails or runs past
+its time limit is reported and the others carry on. A plugin is read-only because the session
+it gets refuses anything that is not a look-only command (`show`, `ping`, ...) - that check is
+in the engine, not in the plugin, so a plugin cannot reconfigure a device whatever it contains.
+It never sees a password: PSTerm logs in with the quick credential you choose and hands the
+plugin an open session. Every run leaves a log of what was sent to which device
+(`Logs\plugins`). Write your own: [docs/PLUGINS.md](docs/PLUGINS.md).
+
 **Logging**
 
 Plain-text logs are what was on the screen: a device that draws and then erases

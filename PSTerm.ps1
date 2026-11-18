@@ -109,9 +109,14 @@ catch {
 . (Join-Path $Root 'src\Profiles.ps1')
 . (Join-Path $Root 'src\Store.ps1')
 . (Join-Path $Root 'src\Connect.ps1')
+. (Join-Path $Root 'src\Device.ps1')
+. (Join-Path $Root 'src\DeviceParsers.ps1')
+. (Join-Path $Root 'src\Topology.ps1')
+. (Join-Path $Root 'src\Plugins.ps1')
 . (Join-Path $Root 'src\Ui\Theme.ps1')
 . (Join-Path $Root 'src\Ui\Dialogs.ps1')
 . (Join-Path $Root 'src\Ui\Tools.ps1')
+. (Join-Path $Root 'src\Ui\PluginDialog.ps1')
 . (Join-Path $Root 'src\Ui\MainWindow.ps1')
 
 # -----------------------------------------------------------------------------

@@ -84,14 +84,25 @@ namespace PSTerm.Render
         }
     }
 
-    /// <summary>A tooltip drawn in the application's colours. The system one is
-    /// light and would be the last white thing on a dark window.</summary>
+    /// <summary>
+    /// The one tooltip the whole application uses: drawn in the application's colours, in the
+    /// system UI font at one size, and placed beside the mouse pointer. The colours are shared
+    /// by every instance, so changing the theme anywhere changes them everywhere; the system
+    /// tooltip is light and would be the last white thing on a dark window.
+    /// </summary>
     public sealed class ThemedToolTip : IDisposable
     {
+        private static Color _back = Color.FromArgb(32, 35, 43);
+        private static Color _border = Color.FromArgb(58, 63, 76);
+        private static Color _text = Color.FromArgb(228, 231, 238);
+        private static Font _font;
+
         private readonly ToolTip _tip = new ToolTip();
-        private Color _back = Color.FromArgb(32, 35, 43);
-        private Color _border = Color.FromArgb(58, 63, 76);
-        private Color _text = Color.FromArgb(228, 231, 238);
+        private readonly Timer _delay = new Timer();
+        private Control _delayOwner;
+        private string _delayText;
+        private bool _shown;
+        private string _pending;
 
         public ThemedToolTip()
         {
@@ -101,7 +112,21 @@ namespace PSTerm.Render
             _tip.AutoPopDelay = 12000;
             _tip.Popup += OnPopup;
             _tip.Draw += OnDraw;
+            _delay.Tick += OnDelayTick;
         }
+
+        /// <summary>The font every tip uses, whatever font the control it belongs to has
+        /// (a button showing an icon glyph would otherwise give a tip in the icon font).</summary>
+        private static Font TipFont
+        {
+            get
+            {
+                if (_font == null) _font = NativeTheme.GetUiFont();
+                return _font;
+            }
+        }
+
+        private static float Scale { get { return NativeTheme.GetScale(TipFont); } }
 
         public void Apply(ControlTheme theme)
         {
@@ -117,30 +142,66 @@ namespace PSTerm.Render
             _tip.SetToolTip(control, text ?? "");
         }
 
-        /// <summary>Show a tip at a position inside a control, for items that are not controls.</summary>
+        /// <summary>
+        /// Show a tip for something that is not a control of its own (a ribbon button, a tab, a
+        /// tree row). It appears beside the pointer after the usual delay, or at once when
+        /// another tip was showing a moment ago. <paramref name="location"/> is not used any more;
+        /// it stays so callers do not change.
+        /// </summary>
         public void ShowAt(Control owner, string text, Point location)
         {
             if (owner == null || string.IsNullOrEmpty(text)) return;
-            _pending = text;
-            _tip.Show(text, owner, location, 12000);
+            _delayOwner = owner;
+            _delayText = text;
+            _delay.Stop();
+            _delay.Interval = _shown ? 60 : 450;
+            _delay.Start();
         }
 
         public void Hide(Control owner)
         {
+            _delay.Stop();
+            _delayOwner = null;
+            _shown = false;
             if (owner != null) _tip.Hide(owner);
+        }
+
+        private void OnDelayTick(object sender, EventArgs e)
+        {
+            _delay.Stop();
+            Control owner = _delayOwner;
+            string text = _delayText;
+            if (owner == null || owner.IsDisposed || !owner.IsHandleCreated || string.IsNullOrEmpty(text)) return;
+
+            // Beside the pointer, flipped to stay on the screen.
+            Point cursor = Cursor.Position;
+            Size size = Measure(text);
+            Rectangle area = Screen.FromPoint(cursor).WorkingArea;
+            float scale = Scale;
+            int x = cursor.X + (int)(10 * scale);
+            int y = cursor.Y + (int)(22 * scale);
+            if (x + size.Width > area.Right) x = Math.Max(area.Left, area.Right - size.Width);
+            if (y + size.Height > area.Bottom) y = Math.Max(area.Top, cursor.Y - size.Height - (int)(6 * scale));
+
+            _pending = text;
+            _shown = true;
+            _tip.Show(text, owner, owner.PointToClient(new Point(x, y)), 12000);
+        }
+
+        private static Size Measure(string text)
+        {
+            float scale = Scale;
+            Size size = TextRenderer.MeasureText(text ?? "", TipFont,
+                new Size((int)(420 * scale), int.MaxValue), TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak);
+            return new Size(size.Width + (int)(18 * scale), size.Height + (int)(12 * scale));
         }
 
         private void OnPopup(object sender, PopupEventArgs e)
         {
             string text = _tip.GetToolTip(e.AssociatedControl);
             if (string.IsNullOrEmpty(text)) text = _pending;
-            Font font = e.AssociatedControl != null ? e.AssociatedControl.Font : SystemFonts.MessageBoxFont;
-            Size size = TextRenderer.MeasureText(text ?? "", font,
-                new Size(420, int.MaxValue), TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak);
-            e.ToolTipSize = new Size(size.Width + 18, size.Height + 12);
+            e.ToolTipSize = Measure(text);
         }
-
-        private string _pending;
 
         private void OnDraw(object sender, DrawToolTipEventArgs e)
         {
@@ -149,21 +210,23 @@ namespace PSTerm.Render
             using (Pen pen = new Pen(_border))
                 e.Graphics.DrawRectangle(pen, 0, 0, e.Bounds.Width - 1, e.Bounds.Height - 1);
 
-            Font font = e.AssociatedControl != null ? e.AssociatedControl.Font : SystemFonts.MessageBoxFont;
-            Rectangle text = Rectangle.Inflate(e.Bounds, -8, -5);
-            TextRenderer.DrawText(e.Graphics, e.ToolTipText, font, text, _text,
+            float scale = Scale;
+            Rectangle text = Rectangle.Inflate(e.Bounds, -(int)(8 * scale), -(int)(5 * scale));
+            TextRenderer.DrawText(e.Graphics, e.ToolTipText, TipFont, text, _text,
                 TextFormatFlags.Left | TextFormatFlags.VerticalCenter |
                 TextFormatFlags.NoPrefix | TextFormatFlags.WordBreak);
         }
 
         public void Dispose()
         {
+            _delay.Stop();
+            _delay.Tick -= OnDelayTick;
+            _delay.Dispose();
             _tip.Popup -= OnPopup;
             _tip.Draw -= OnDraw;
             _tip.Dispose();
         }
     }
-
     // =========================================================================
     // Ribbon
     // =========================================================================

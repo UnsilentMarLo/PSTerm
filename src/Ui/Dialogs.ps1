@@ -609,6 +609,7 @@ function Show-PSTermCommandPalette {
     Add-Command 'New connection...'      'Create a saved profile'      { Invoke-PSTermNewConnection -State $State }.GetNewClosure()
     Add-Command 'New folder...'          'Group connections'           { Invoke-PSTermNewFolder -State $State -Parent '' }.GetNewClosure()
     Add-Command 'Quick credentials...'   'Saved enable and login secrets' { Show-PSTermCredentialManager -State $State }.GetNewClosure()
+    Add-Command 'Plugins...'           'Health, inventory and topology of many devices' { Show-PSTermPluginDialog -State $State }.GetNewClosure()
     Add-Command 'Import from CSV...'     'e.g. a NetBox export'        { Invoke-PSTermImportCsv -State $State }.GetNewClosure()
     Add-Command 'Import PSTerm session file...' '.psterm'             { Invoke-PSTermImportSessions -State $State }.GetNewClosure()
     Add-Command 'Export all connections...' '.psterm'                 { Invoke-PSTermExportSessions -State $State -Scope All }.GetNewClosure()
@@ -828,79 +829,99 @@ function Show-PSTermCommandPalette {
 # =============================================================================
 
 function Show-PSTermFind {
+    <#
+    .SYNOPSIS
+        The scrollback search. It is a window of its own beside the terminal, not a modal
+        dialog: the main window stays usable while it is open, and Ctrl+Shift+F again just
+        brings it back.
+    #>
     param([Parameter(Mandatory)]$State)
+
+    if ($State.FindDialog -and -not $State.FindDialog.IsDisposed) {
+        $State.FindDialog.Activate()
+        $State.FindDialog.Tag.Query.Focus() | Out-Null
+        return
+    }
 
     $tab = Get-PSTermActiveTab -State $State
     if (-not $tab) { return }
 
     $theme = $State.Theme
-    $scale = Get-PSTermScale -Control $State.Form
-
-    $dialog = New-Object PSTerm.Render.ThemedForm
-    $dialog.Text = 'Find in scrollback'
-    $dialog.FormBorderStyle = 'FixedToolWindow'
-    $dialog.StartPosition = 'CenterParent'
-    $dialog.Font = New-PSTermFont
-    $dialog.Size = New-Object System.Drawing.Size([int](440 * $scale), [int](170 * $scale))
+    $shell = New-PSTermDialogShell -State $State -Title 'Find in scrollback' -Width 460 -Height 210 -OkText 'Close' -NoCancel
+    $dialog = $shell.Form
+    $scale = $shell.Scale
 
     $grid = New-PSTermFieldGrid
-    $queryBox = Add-PSTermField $grid 'Find' (New-PSTermTextField '') $theme
-    $caseBox = Add-PSTermField $grid '' (New-PSTermCheckField 'Match case' $false) $theme
+    $grid.Dock = 'Top'
+    $queryBox = Add-PSTermField $grid 'Find' (New-PSTermTextField '') $theme -Tips $shell.Tips -Tip 'The text to look for in the scrollback. Next searches towards the newest output, Previous towards the oldest.'
+    $caseBox = Add-PSTermField $grid '' (New-PSTermCheckField 'Match case' $false) $theme -Tips $shell.Tips
 
-    $buttonHeight = [int]($dialog.Font.Height * 1.85)
-    $row = New-Object System.Windows.Forms.FlowLayoutPanel
-    $row.Dock = 'Bottom'
-    $row.FlowDirection = 'RightToLeft'
-    $row.Height = $buttonHeight + [int](16 * $scale)
-    $row.Padding = New-Object System.Windows.Forms.Padding([int](10 * $scale), [int](8 * $scale), [int](10 * $scale), [int](8 * $scale))
-
-    $closeButton = New-Object System.Windows.Forms.Button
-    $closeButton.Text = 'Close'
-    $closeButton.DialogResult = 'Cancel'
-    $closeButton.Width = [int](88 * $scale); $closeButton.Height = $buttonHeight
+    $result = New-Object System.Windows.Forms.Label
+    $result.Dock = 'Top'
+    $result.Height = [int]($shell.RowHeight * 1.1)
+    $result.Padding = New-Object System.Windows.Forms.Padding([int](10 * $scale), [int](4 * $scale), 0, 0)
+    $result.Tag = 'muted'
+    $result.ForeColor = $theme.TextMuted
+    $result.Text = ''
 
     $prevButton = New-Object System.Windows.Forms.Button
     $prevButton.Text = 'Previous'
-    $prevButton.Width = [int](88 * $scale); $prevButton.Height = $buttonHeight
-
     $nextButton = New-Object System.Windows.Forms.Button
     $nextButton.Text = 'Next'
-    $nextButton.Width = [int](88 * $scale); $nextButton.Height = $buttonHeight
+    foreach ($b in @($prevButton, $nextButton)) { $b.Width = [int](96 * $scale); $b.Height = $shell.RowHeight }
+    $shell.Tips.SetTip($prevButton, 'Find the previous match, towards older output.')
+    $shell.Tips.SetTip($nextButton, 'Find the next match, towards newer output (Enter).')
+    # The row runs right to left: Close is already at the end, these go to its left.
+    $shell.Flow.Controls.Add($nextButton)
+    $shell.Flow.Controls.Add($prevButton)
 
-    $row.Controls.AddRange(@($closeButton, $nextButton, $prevButton))
-
-    $dialog.Controls.Add($grid)
-    $dialog.Controls.Add($row)
-    $dialog.CancelButton = $closeButton
+    $shell.Body.Controls.Add($result)
+    $shell.Body.Controls.Add($grid)
     $dialog.AcceptButton = $nextButton
+    $dialog.Tag = [pscustomobject]@{ Query = $queryBox }
 
     # Search starts from the live bottom and walks backwards, which is what people
-    # mean by "find the last time this happened".
-    $cursor = [ref]$tab.Control.Terminal.Screen.TotalLines
+    # mean by "find the last time this happened". It follows whichever tab is active.
+    $position = @{ Tab = $tab; Line = $tab.Control.Terminal.Screen.TotalLines }
 
     $search = {
         param([bool]$Forward)
         $needle = $queryBox.Text
         if (-not $needle) { return }
-        $found = $tab.Control.FindInScrollback($needle, $cursor.Value, $Forward, $caseBox.Checked)
+        $current = Get-PSTermActiveTab -State $State
+        if (-not $current) { $result.Text = 'There is no open tab to search.'; return }
+        if (-not [object]::ReferenceEquals($current, $position.Tab)) {
+            $position.Tab = $current
+            $position.Line = $current.Control.Terminal.Screen.TotalLines
+        }
+        $found = $current.Control.FindInScrollback($needle, $position.Line, $Forward, $caseBox.Checked)
         if ($found -ge 0) {
-            $cursor.Value = $found
-            $tab.Control.ScrollToLine($found)
-            $dialog.Text = "Find in scrollback - line $found"
+            $position.Line = $found
+            $current.Control.ScrollToLine($found)
+            $result.Text = "Found on line $found."
         }
         else {
-            $dialog.Text = 'Find in scrollback - no match'
+            $result.Text = 'No match.'
         }
     }.GetNewClosure()
 
     $nextButton.Add_Click({ & $search $false }.GetNewClosure())
     $prevButton.Add_Click({ & $search $true }.GetNewClosure())
 
-    Set-PSTermFormTheme -Control $dialog -Theme $theme
-    [void]$dialog.ShowDialog($State.Form)
-    $dialog.Dispose()
-}
+    # Closing it (the Close button, Escape, the X) returns the keyboard to the terminal.
+    $dialog.Add_FormClosed({
+        $State.FindDialog = $null
+        $shell.Tips.Dispose()
+        $active = Get-PSTermActiveTab -State $State
+        if ($active) { $active.Control.Focus() | Out-Null }
+    }.GetNewClosure())
 
+    Set-PSTermFormTheme -Control $dialog -Theme $theme
+    $State.FindDialog = $dialog
+    $dialog.Owner = $State.Form
+    $dialog.Show()
+    $queryBox.Focus() | Out-Null
+}
 # =============================================================================
 # Menu and commands
 # =============================================================================
@@ -921,6 +942,7 @@ function Show-PSTermMenu {
     [void](Add-MenuItem 'New connection...' { Invoke-PSTermNewConnection -State $State }.GetNewClosure())
     [void](Add-MenuItem 'New folder...' { Invoke-PSTermNewFolder -State $State -Parent '' }.GetNewClosure())
     [void](Add-MenuItem 'Quick credentials...' { Show-PSTermCredentialManager -State $State }.GetNewClosure())
+    [void](Add-MenuItem 'Plugins...' { Show-PSTermPluginDialog -State $State }.GetNewClosure())
     [void]$menu.Items.Add('-')
     [void](Add-MenuItem 'Import from CSV...' { Invoke-PSTermImportCsv -State $State }.GetNewClosure())
     [void](Add-MenuItem 'Import PSTerm session file...' { Invoke-PSTermImportSessions -State $State }.GetNewClosure())

@@ -108,7 +108,12 @@ function New-PSTermPasswordField {
     $panel.ColumnCount = 2
     $panel.RowCount = 1
     $panel.Margin = New-Object System.Windows.Forms.Padding(0)
-    $panel.Height = [int]((New-PSTermFont).Height * 1.9)
+    # Exactly as tall as an ordinary text box in the same dialog, so a row with a button
+    # beside the box does not stand taller than its neighbours.
+    $probe = New-Object System.Windows.Forms.TextBox
+    $probe.Font = New-PSTermFont
+    $panel.Height = $probe.PreferredHeight
+    $probe.Dispose()
     [void]$panel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('Percent', 100)))
     [void]$panel.ColumnStyles.Add((New-Object System.Windows.Forms.ColumnStyle('AutoSize')))
     [void]$panel.RowStyles.Add((New-Object System.Windows.Forms.RowStyle('Percent', 100)))
@@ -117,13 +122,14 @@ function New-PSTermPasswordField {
     $box.UseSystemPasswordChar = $true
     $box.Text = $Value
     $box.Dock = 'Fill'
-    $box.Margin = New-Object System.Windows.Forms.Padding(0, 3, 4, 3)
+    $box.AutoSize = $false        # so it fills the row instead of centring at its own height
+    $box.Margin = New-Object System.Windows.Forms.Padding(0, 0, 4, 0)
 
     $toggle = New-Object System.Windows.Forms.Button
     $toggle.Text = 'Show'
     $toggle.Dock = 'Fill'
     $toggle.Width = [int]((New-PSTermFont).Height * 4.2)
-    $toggle.Margin = New-Object System.Windows.Forms.Padding(0, 1, 0, 1)
+    $toggle.Margin = New-Object System.Windows.Forms.Padding(0)
     $toggle.TabStop = $false
     $toggle.Add_Click({
         $box.UseSystemPasswordChar = -not $box.UseSystemPasswordChar
@@ -307,6 +313,7 @@ function Show-PSTermCredentialManager {
     $hint = New-Object System.Windows.Forms.Label
     $hint.Text = "Leave the secret empty to keep the one that is saved."
     $hint.ForeColor = $theme.TextMuted
+    $hint.Tag = 'muted'
     $hint.Dock = 'Top'
     $hint.Height = [int]((New-PSTermFont).Height * 1.8)
     $hint.Padding = New-Object System.Windows.Forms.Padding(8, 4, 0, 0)
@@ -643,7 +650,11 @@ function Show-PSTermSettings {
     $baud = Add-PSTermField $grid 'Detected port speed' (New-PSTermComboField -Items @('1200','2400','4800','9600','19200','38400','57600','115200') -Value ([string]$settings.detectedPortBaud) -Editable) $theme -Tips $shell.Tips `
         -Tip 'The baud rate used when a detected port is opened. Cisco consoles use 9600.'
     $pace = Add-PSTermField $grid 'Paced paste' (New-PSTermComboField -Items @('Off', 'Serial', 'All') -Value ([string]$settings.pacePaste)) $theme -Tips $shell.Tips `
-        -Tip 'Feed a pasted block to the device one line at a time, waiting for each answer, instead of all at once. It is about two to three times slower. Turn it on for a console that drops characters when a block arrives at full speed; the Catalyst switches this was tried on did not. Serial = serial connections only.'
+        -Tip 'Feed a pasted block to the device a few lines at a time, waiting for it to answer each time, instead of all at once. It is slower, but a console that drops characters when a block arrives at full speed then gets every line. Serial = serial connections only.'
+    $blockChoices = @('Line by line', '5 lines at a time', '10 lines at a time', '20 lines at a time', '50 lines at a time')
+    $blockCurrent = switch ([int]$settings.pacePasteLines) { 5 { $blockChoices[1] } 10 { $blockChoices[2] } 20 { $blockChoices[3] } 50 { $blockChoices[4] } default { $blockChoices[0] } }
+    $paceLines = Add-PSTermField $grid 'Paste in blocks of' (New-PSTermComboField -Items $blockChoices -Value $blockCurrent) $theme -Tips $shell.Tips `
+        -Tip 'How many lines go out together before PSTerm waits for the device. Line by line is the safest and slowest; larger blocks are quicker. Only used when paced paste is on.'
     $paste = Add-PSTermField $grid '' (New-PSTermCheckField 'Ask before pasting several lines' ([bool]$settings.confirmMultilinePaste)) $theme -Tips $shell.Tips `
         -Tip 'A pasted line break is an Enter keypress, so every line runs at once. This gives you the chance to say no.'
     $shell.Body.Controls.Add($grid)
@@ -655,6 +666,7 @@ function Show-PSTermSettings {
     $settings.detectedPortBaud = ConvertTo-PSTermInt $baud.Text 9600
     $settings.confirmMultilinePaste = $paste.Checked
     $settings.pacePaste = [string]$pace.SelectedItem
+    $settings.pacePasteLines = switch ([int]$paceLines.SelectedIndex) { 1 { 5 } 2 { 10 } 3 { 20 } 4 { 50 } default { 1 } }
     Save-PSTermSettings -Root $State.Root -Settings $settings
     Set-PSTermStatusMessage -State $State -Message 'Settings saved. The serial port setting applies the next time PSTerm starts.'
 }

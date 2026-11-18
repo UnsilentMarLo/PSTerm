@@ -111,6 +111,28 @@ namespace PSTerm.Render
             }
         }
 
+        private const int TVM_SETEXTENDEDSTYLE = 0x1100 + 44;
+        private const int TVS_EX_DOUBLEBUFFER = 0x0004;
+
+        protected override void OnHandleCreated(EventArgs e)
+        {
+            base.OnHandleCreated(e);
+            // The tree control's own double buffering: with owner drawing, WinForms'
+            // style flag alone still erases each row and then paints it, which shows as
+            // flicker whenever the mouse moves over the list.
+            try { SendMessage(Handle, TVM_SETEXTENDEDSTYLE, (IntPtr)TVS_EX_DOUBLEBUFFER, (IntPtr)TVS_EX_DOUBLEBUFFER); }
+            catch (Exception) { }
+        }
+
+        /// <summary>Repaint one row, not the whole list.</summary>
+        private void InvalidateRow(TreeNode node)
+        {
+            if (node == null) return;
+            Rectangle b = node.Bounds;
+            if (b.Height <= 0) return;
+            Invalidate(new Rectangle(0, b.Top, ClientSize.Width, b.Height));
+        }
+
         public void ApplyTheme(ControlTheme theme)
         {
             if (theme == null) return;
@@ -350,9 +372,11 @@ namespace PSTerm.Render
 
             if (!ReferenceEquals(node, _hotNode) || button != _hotButton)
             {
+                TreeNode previous = _hotNode;
                 _hotNode = node;
                 _hotButton = button;
-                Invalidate();
+                InvalidateRow(previous);
+                InvalidateRow(node);
 
                 string tip = null;
                 if (button == "add") tip = "New connection in this folder";
@@ -369,7 +393,7 @@ namespace PSTerm.Render
         protected override void OnMouseLeave(EventArgs e)
         {
             base.OnMouseLeave(e);
-            if (_hotNode != null) { _hotNode = null; _hotButton = null; Invalidate(); }
+            if (_hotNode != null) { TreeNode previous = _hotNode; _hotNode = null; _hotButton = null; InvalidateRow(previous); }
             _tips.Hide(this);
             _shownTip = null;
         }

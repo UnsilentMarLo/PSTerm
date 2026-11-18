@@ -852,6 +852,23 @@ namespace PSTerm.Render
         /// piece that cannot be drawn here, because the scroll bars belong to the
         /// control's own window. It is a no-op where the theme does not exist.
         /// </summary>
+        [DllImport("user32.dll")]
+        private static extern IntPtr SendMessage(IntPtr hWnd, int msg, IntPtr wParam, IntPtr lParam);
+
+        private const int WM_SETREDRAW = 0x000B;
+
+        /// <summary>
+        /// Stop a control and its children from painting while several of them are moved
+        /// and resized, then paint the finished result once. Without it each step of a
+        /// re-layout is drawn: panels flash their background colour for a moment.
+        /// </summary>
+        public static void SetRedraw(Control control, bool on)
+        {
+            if (control == null || !control.IsHandleCreated) return;
+            SendMessage(control.Handle, WM_SETREDRAW, on ? (IntPtr)1 : IntPtr.Zero, IntPtr.Zero);
+            if (on) control.Invalidate(true);
+        }
+
         public static void UseDarkScrollBars(Control control)
         {
             if (control == null || !control.IsHandleCreated) return;
